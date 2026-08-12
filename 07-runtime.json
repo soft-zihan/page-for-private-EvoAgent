@@ -46,6 +46,10 @@
             },
             {
               "type": "text",
+              "text": "### LangChain/LangGraph 对照\n\n```python\nfrom langgraph.graph import StateGraph, END\nfrom langgraph.checkpoint.sqlite import SqliteSaver\n\ngraph = StateGraph(ReviewState)\ngraph.add_node(\"planning\", planning_node)\ngraph.add_node(\"executing\", executing_node)\ngraph.add_node(\"reviewing\", reviewing_node)\ngraph.add_edge(\"planning\", \"executing\")\ngraph.add_edge(\"executing\", \"reviewing\")\ngraph.add_edge(\"reviewing\", END)\n# LangGraph 内置 checkpoint 持久化，无需手写 save/load\napp = graph.compile(checkpointer=SqliteSaver.from_conn_string(\"db.sqlite\"))\nresult = app.invoke(initial_state)\n```\n\n**对比要点**：LangGraph 用声明式 `StateGraph` 定义节点图并内置 checkpoint 支持，代码更简洁；EvoAgent 的 `AgentRuntime` 手写执行循环，换来对步骤预算、时间预算、取消检查和重试策略的完全控制。"
+            },
+            {
+              "type": "text",
               "text": "这段代码有几个精妙的设计决策：(1) checkpoint 恢复是透明的——如果 planning 节点已完成，状态直接从数据库恢复，不重新执行；(2) 不可重试异常（ValueError、RuntimeCancelled、RuntimeBudgetExceeded）直接穿透重试循环；(3) 每次失败也保存 checkpoint（status=failed），使得外部可以知道任务在哪个节点失败。"
             }
           ]
@@ -71,6 +75,10 @@
             },
             {
               "type": "text",
+              "text": "### LangChain/LangGraph 对照\n\n```python\nfrom langgraph.prebuilt import create_react_agent\nfrom langchain_openai import ChatOpenAI\n\nllm = ChatOpenAI(model=\"gpt-4o\")\nagent = create_react_agent(\n    llm,\n    tools=[search_diff, get_changed_line],\n    state_modifier=\"You are a code reviewer. Analyze diffs and report issues.\",\n)\n# LangGraph 内置 ReAct 循环，无需手写 step/observation 管理\nresult = agent.invoke({\"messages\": [{\"role\": \"user\", \"content\": diff}]})\n# 循环边界通过 recursion_limit 控制，而非 max_steps + timeout 双重预算\n```\n\n**对比要点**：LangGraph 的 `create_react_agent` 封装了整个 ReAct 循环（消息管理、工具调度、observation 累积），一行代码即可运行；EvoAgent 的 AgentLoop 则显式控制每一步，提供步骤+时间双重预算和取消检查等细粒度控制。"
+            },
+            {
+              "type": "text",
               "text": "ToolRegistry 是 AgentLoop 的安全门。它对每次工具调用执行 JSON Schema 校验：检查必填参数、类型匹配、值范围限制。这防止 LLM 产生格式错误的工具调用，也防止恶意输入通过工具参数注入。"
             },
             {
@@ -80,6 +88,10 @@
                 "content": "# ToolRegistry：工具注册表——AgentLoop 的安全门\n# 对每次工具调用执行四层校验，防止 LLM 产生格式错误或恶意的工具参数\n# ToolRegistry：核心类，封装了系统的关键行为和状态\nclass ToolRegistry:\n    @staticmethod\n    # _validate：内部辅助方法，供类内部其他方法调用\n    def _validate(schema, arguments):\n        # 第 1 层：必填参数检查——缺少 required 中的任何参数都报错\n        missing = required.difference(arguments)\n        if missing: raise AgentLoopProtocolError(\"missing required tool arguments: ...\")\n        # 第 2 层：额外参数检查——当 additionalProperties=false 时，不允许未声明的参数\n        # 初始化集合 unknown，用于去重和快速查找\n        unknown = set(arguments).difference(properties)\n        if unknown: raise AgentLoopProtocolError(\"unknown tool arguments: ...\")\n        # 第 3 层：类型检查——确保每个参数类型与 schema 声明一致\n        # 支持 string/integer/number/boolean/object/array 六种 JSON 类型\n        for key, value in arguments.items():\n            expected = expected_types.get(spec.get(\"type\"))\n            if expected and not isinstance(value, expected):\n                raise AgentLoopProtocolError(\"tool argument %s must be %s\" % ...)\n        # 第 4 层：范围检查——数值类型可设置 minimum/maximum 约束\n        if \"minimum\" in spec and value < spec[\"minimum\"]: raise ...\n        if \"maximum\" in spec and value > spec[\"maximum\"]: raise ...",
                 "caption": "ToolRegistry._validate()：四层参数校验"
               }
+            },
+            {
+              "type": "text",
+              "text": "### LangChain/LangGraph 对照\n\n```python\nfrom langchain.tools import tool\n\n@tool\ndef search_diff(query: str, limit: int = 20) -> list:\n    \"\"\"Search diff for matching text fragments.\"\"\"\n    # LangChain 自动从函数签名 + 类型注解生成 JSON Schema\n    # 并校验：必填参数、类型匹配、值范围——无需手写 _validate\n    return [line for line in diff_lines if query in line][:limit]\n\n@tool\ndef get_changed_line(path: str, line_number: int) -> str:\n    \"\"\"Get a specific changed line by file path and line number.\"\"\"\n    return parsed_files[path][line_number]\n\n# 工具注册：直接传工具列表，框架自动处理 schema 生成和校验\nagent = create_react_agent(llm, tools=[search_diff, get_changed_line])\n```\n\n**对比要点**：LangChain 的 `@tool` 装饰器通过函数签名和类型注解自动生成 JSON Schema 并校验，省去了手写 `_validate()` 四层校验逻辑；但 EvoAgent 的手写校验提供了更细粒度的控制（如额外参数检查、值范围约束）。"
             }
           ]
         },
@@ -185,6 +197,10 @@
                 "content": "# RuntimeState 结构（TypedDict）：节点间传递的内存状态\n# TypedDict 声明字典的键类型，让开发者清楚知道状态里有哪些字段\n# 注意：这不是数据库持久化状态，而是单次执行过程中的内存数据\n{\n    \"task_id\": str,           # 任务 ID——全局唯一标识\n    \"repository\": str,        # 仓库名（如 'acme/api-service'）\n    \"pull_request\": int | None, # PR 编号（直接 API 调用时为 None）\n    \"diff\": str,              # 原始 unified diff 文本\n    \"parsed\": {               # planning 节点的输出：解析后的结构化数据\n        \"files\": [...],       # 变更文件路径列表\n        \"added_lines\": [      # 新增行列表（所有审查器的输入）\n            {\"path\": \"...\", \"line\": 1, \"content\": \"...\"}\n        ]\n    },\n    \"findings\": [...],        # executing 节点的输出：审查发现的 Finding 列表\n    \"report\": {...}           # reviewing 节点的输出：最终审查报告\n}",
                 "caption": "RuntimeState：节点间传递的内存状态"
               }
+            },
+            {
+              "type": "text",
+              "text": "### LangChain/LangGraph 对照\n\n```python\nfrom typing import Annotated, TypedDict\nimport operator\nfrom langgraph.graph import StateGraph, END\nfrom langgraph.checkpoint.sqlite import SqliteSaver\n\nclass ReviewState(TypedDict):\n    task_id: str\n    repository: str\n    diff: str\n    parsed: dict\n    findings: Annotated[list, operator.add]  # 多节点输出自动累加\n    report: dict\n\ngraph = StateGraph(ReviewState)\ngraph.add_node(\"planning\", planning_node)\ngraph.add_node(\"executing\", executing_node)\ngraph.add_node(\"reviewing\", reviewing_node)\ngraph.add_edge(\"planning\", \"executing\")\ngraph.add_edge(\"executing\", \"reviewing\")\ngraph.add_edge(\"reviewing\", END)\napp = graph.compile(checkpointer=SqliteSaver.from_conn_string(\"db.sqlite\"))\nresult = app.invoke({\"task_id\": \"t1\", \"diff\": diff_text, \"findings\": []})\n```\n\n**对比要点**：LangGraph 用 `Annotated[list, operator.add]` 实现状态字段自动累加，而 EvoAgent 手动 `state.update(output)` 合并；LangGraph 的 `SqliteSaver` 内置 checkpoint 持久化，无需手写 save/load 逻辑。"
             },
             {
               "type": "text",
