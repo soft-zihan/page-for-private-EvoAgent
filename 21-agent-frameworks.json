@@ -1,6 +1,6 @@
 {
   "title": "附录：从自建 Runtime 到主流 Agent 框架",
-  "description": "将 EvoAgent 的自建 AgentRuntime + AgentLoop + MultiAgentCoordinator 映射到 OpenAI Agents SDK、LangGraph、CrewAI 三大主流框架，理解框架选型对文件结构和代码组织的影响。",
+  "description": "将 EvoAgent 的自建 AgentRuntime + AgentLoop + MultiAgentCoordinator 映射到 OpenAI Agents SDK、LangChain/LangGraph、CrewAI 三大主流框架，理解框架选型对文件结构和代码组织的影响。",
   "chapters": [
     {
       "title": "核心概念映射",
@@ -129,6 +129,48 @@
       ]
     },
     {
+      "title": "LangChain 核心库映射",
+      "sections": [
+        {
+          "title": "LangChain vs LangGraph：职责分工",
+          "blocks": [
+            {
+              "type": "text",
+              "content": "LangChain 生态分为两层：**LangChain 核心库**负责 LLM 调用、工具封装、记忆管理、可观测性等基础设施；**LangGraph** 在 LangChain 之上提供图编排能力。两者是互补关系，不是替代关系。\n\n| 层次 | 职责 | EvoAgent 对应组件 |\n|------|------|------------------|\n| **LangChain 核心** | LLM 调用、Tool 封装、Memory、Context 管理、Callbacks | `reviewer.py`、`memory.py`、`context_manager.py`、`observability.py` |\n| **LangGraph** | 图编排、状态管理、检查点、多 Agent 协作 | `runtime.py`、`agents.py`、`harness.py` |\n\n前一节的 LangGraph 映射覆盖了编排层。本节补充 LangChain 核心库对 EvoAgent 基础设施层的映射。"
+            }
+          ]
+        },
+        {
+          "title": "概念对照：EvoAgent → LangChain 核心",
+          "blocks": [
+            {
+              "type": "table",
+              "table": {
+                "headers": ["EvoAgent 组件", "LangChain 等价物", "差异说明"],
+                "rows": [
+                  ["reviewer.py (urllib 调用 LLM)", "ChatOpenAI / BaseChatModel", "LangChain 封装了 LLM 调用协议，支持多模型切换"],
+                  ["ToolRegistry + AgentTool", "BaseTool / @tool 装饰器", "LangChain 的 @tool 自动从函数签名生成 Schema"],
+                  ["MemoryManager", "langchain.memory 家族", "LangChain 提供 Buffer/Summary/Entity 等多种记忆策略"],
+                  ["ContextManager (token 管理)", "PromptTemplate + text_splitter", "LangChain 用模板 + 分割器管理上下文窗口"],
+                  ["Observability (OpenTelemetry)", "LangSmith / LangFuse", "第三方平台替代自建 OTel，提供 UI 追踪"],
+                  ["event_sink (事件回调)", "Callbacks 系统", "LangChain 的 on_llm_start/on_tool_end 等回调钩子"]
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "title": "对照实现：LLM 调用 + 工具 + 记忆",
+          "blocks": [
+            {
+              "type": "text",
+              "content": "### LangChain 对照\n\n```python\n# ── 1. LLM 调用：ChatOpenAI 替代 urllib.request 手写协议 ──\n# EvoAgent (reviewer.py):\n#   import urllib.request\n#   req = urllib.request.Request(base_url + \"/chat/completions\", data=json.dumps({...}))\n#   resp = urllib.request.urlopen(req, timeout=timeout)\n#   result = json.loads(resp.read())\n#\n# LangChain:\nfrom langchain_openai import ChatOpenAI\nllm = ChatOpenAI(model=\"gpt-4o\", temperature=0)\nresponse = llm.invoke([\n    (\"system\", \"You are a code reviewer...\"),\n    (\"user\", diff_text),\n])\n# 优势：自动处理重试、超时、流式、多模型切换\n\n# ── 2. 工具封装：@tool 替代 AgentTool 手动定义 ──\n# EvoAgent (agents.py):\n#   AgentTool(\"search_diff\", \"Search the PR diff...\",\n#             {\"type\": \"object\", \"properties\": {...}}, handler)\n#\n# LangChain:\nfrom langchain.tools import tool\n\n@tool\ndef search_diff(query: str, limit: int = 20) -> list:\n    \"\"\"Search the PR diff for a text fragment.\"\"\"\n    return [line for line in diff_lines if query.lower() in line.lower()][:limit]\n# 优势：自动从函数签名 + docstring 生成 JSON Schema\n\n# ── 3. 记忆管理：Memory 替代 MemoryManager 手写实现 ──\n# EvoAgent (memory.py):\n#   class MemoryManager:\n#       def recall(tenant, repo, query) -> list\n#       def remember(tenant, repo, scope, kind, content)\n#\n# LangChain:\nfrom langchain.memory import ConversationSummaryMemory\nfrom langchain_community.chat_message_histories import PostgresChatMessageHistory\n\nmemory = ConversationSummaryMemory(\n    llm=llm,\n    chat_memory=PostgresChatMessageHistory(\n        session_id=task_id, connection_string=DB_URL\n    ),\n)\n# 优势：自动摘要压缩、多种存储后端、与 Chain 集成\n\n# ── 4. 上下文管理：PromptTemplate 替代 ContextManager ──\n# EvoAgent (context_manager.py):\n#   bundle = context_manager.build(diff, assignment, memories)\n#   managed = context_manager.compose(bundle, inbox, tools)\n#\n# LangChain:\nfrom langchain.prompts import ChatPromptTemplate\n\nprompt = ChatPromptTemplate.from_messages([\n    (\"system\", \"Review code changes. Available tools: {tools}\"),\n    (\"user\", \"PR diff:\\n{diff}\\n\\nAssignment: {assignment}\\n\\nMemories: {memories}\"),\n])\n# 优势：模板变量自动填充、token 计数、自动截断\n\n# ── 5. 可观测性：LangSmith 替代自建 OTel ──\n# EvoAgent (observability.py):\n#   with observability.span(\"runtime.planner\", task_id, node=\"planner\"):\n#       result = plan_node(state)\n#\n# LangChain + LangSmith:\nimport os\nos.environ[\"LANGCHAIN_TRACING_V2\"] = \"true\"\nos.environ[\"LANGCHAIN_API_KEY\"] = \"...\"\n# 零代码集成：LangChain 自动追踪每个 LLM 调用、工具调用、Chain 执行\n# LangSmith UI 提供时间线、token 用量、成本分析\n```\n\n**关键差异**：\n- EvoAgent 的 `urllib.request` 手写 LLM 调用 → LangChain 一行 `llm.invoke()`\n- EvoAgent 的 `MemoryManager` 手写召回/存储 → LangChain 内置 Memory 类 + 多种存储后端\n- EvoAgent 的 `ContextManager` 手写 token 管理 → LangChain PromptTemplate 自动截断\n- EvoAgent 的 `Observability` 自建 OTel → LangSmith 零代码追踪\n\n**注意**：LangChain 核心库**不解决编排问题**。多 Agent 协作、节点编排、检查点恢复仍需 LangGraph。"
+            }
+          ]
+        }
+      ]
+    },
+    {
       "title": "CrewAI 映射",
       "sections": [
         {
@@ -185,16 +227,17 @@
             {
               "type": "table",
               "table": {
-                "headers": ["维度", "OpenAI Agents SDK", "LangGraph", "CrewAI"],
+                "headers": ["维度", "OpenAI Agents SDK", "LangChain 核心", "LangGraph", "CrewAI"],
                 "rows": [
-                  ["编排模型", "Handoff 链", "有向图 (StateGraph)", "Task 链 / 层级"],
-                  ["与 EvoAgent 相似度", "中——handoff 类似 planner", "高——节点 + 边最接近 RuntimeNode", "低——声明式配置风格差异大"],
-                  ["迁移工作量", "中——需重写编排为 handoff", "小——RuntimeNode 直接映射为 node", "大——需重构为 YAML 配置"],
-                  ["LLM 厂商锁定", "OpenAI only", "无锁定（多模型）", "无锁定（多模型）"],
-                  ["状态持久化", "Runner 内置", "SqliteSaver / PostgresSaver", "企业版"],
-                  ["可视化", "无", "Mermaid 图 + LangGraph Studio", "Web Dashboard"],
-                  ["适用场景", "OpenAI 生态、简单 Agent", "复杂工作流、需要精细控制", "快速原型、角色分工明确"],
-                  ["EvoAgent 最适合?", "适合 LLM Agent 部分迁移", "最适合全量迁移", "适合快速验证多 Agent 设计"]
+                  ["主要职责", "Agent 编排", "LLM/工具/记忆封装", "图编排 + 状态管理", "角色任务编排"],
+                  ["编排模型", "Handoff 链", "无（链式调用）", "有向图 (StateGraph)", "Task 链 / 层级"],
+                  ["与 EvoAgent 相似度", "中", "高（Memory/Context 一一对应）", "高（节点 + 边）", "低"],
+                  ["迁移工作量", "中", "小（替换基础设施层）", "小（替换编排层）", "大"],
+                  ["LLM 厂商锁定", "OpenAI only", "无锁定", "无锁定", "无锁定"],
+                  ["状态持久化", "Runner 内置", "多种 Memory 后端", "SqliteSaver / PostgresSaver", "企业版"],
+                  ["可观测性", "无", "LangSmith / LangFuse", "LangGraph Studio", "Web Dashboard"],
+                  ["适用场景", "OpenAI 生态", "基础设施替换", "复杂工作流", "快速原型"],
+                  ["EvoAgent 最适合?", "LLM Agent 迁移", "渐进式迁移第一步", "全量迁移", "多 Agent 验证"]
                 ]
               }
             }
@@ -205,7 +248,7 @@
           "blocks": [
             {
               "type": "text",
-              "content": "### 渐进式迁移路径\n\n**阶段 1：AgentLoop → create_react_agent（最小改动）**\n\n保留 `AgentRuntime` 节点编排不变，只把 `AgentLoop.run()` 替换为框架内置的 ReAct Agent。这是风险最低的迁移——`ToolRegistry` 中的 `search_diff`、`changed_line` 等工具直接包装为 `@tool` 或 `@function_tool`，审查逻辑不受影响。\n\n**阶段 2：AgentRuntime → StateGraph（结构对齐）**\n\n将 `RuntimeNode` 链替换为 LangGraph 的 `StateGraph`。`_plan_node`、`_specialist_node` 等函数签名 `(state) -> dict` 不变，只需要加 `add_node()` + `add_edge()`。检查点从自建 `CheckpointStore` 迁移到 `SqliteSaver`。\n\n**阶段 3：MultiAgentCoordinator → 框架 Agent（全面替换）**\n\n将 `agents.py` 中的 1000 行 Python 类拆分为独立的 Agent 定义 + Task 配置。`PlannerAgent` → 条件路由或 ManagerAgent，`CriticAgent` → 独立 Agent 或 Guardrail。\n\n### 不变的核心资产\n\n无论迁移到哪个框架，以下组件**不需要改动**：\n\n- **diff_parser.py** — 纯解析逻辑，与框架无关\n- **reviewer.py** 中的正则规则 — 确定性审查不依赖 LLM\n- **store.py / postgres_store.py** — 持久化层独立于 Agent 框架\n- **Finding / ReviewReport 数据模型** — 业务模型与编排解耦\n- **auth.py / github.py** — 认证和外部集成是独立关注点\n\n这正是 EvoAgent 架构设计的优势：**审查逻辑和 Agent 编排正交**，迁移框架只需要替换编排层，审查核心完全保留。"
+              "content": "### 渐进式迁移路径\n\n**阶段 0：LangChain 核心库替换基础设施（零风险）**\n\n保留整个编排层不变，只替换基础设施：`urllib.request` → `ChatOpenAI`、`MemoryManager` → `ConversationSummaryMemory`、`ContextManager` → `ChatPromptTemplate`、`Observability` → LangSmith。这是风险最低的起步——审查逻辑完全不受影响，但获得了多模型支持、记忆压缩和可观测性。\n\n**阶段 1：AgentLoop → create_react_agent（最小改动）**\n\n保留 `AgentRuntime` 节点编排不变，只把 `AgentLoop.run()` 替换为 LangGraph 内置的 ReAct Agent。`ToolRegistry` 中的 `search_diff`、`changed_line` 等工具直接包装为 `@tool`，审查逻辑不受影响。\n\n**阶段 2：AgentRuntime → StateGraph（结构对齐）**\n\n将 `RuntimeNode` 链替换为 LangGraph 的 `StateGraph`。`_plan_node`、`_specialist_node` 等函数签名 `(state) -> dict` 不变，只需要加 `add_node()` + `add_edge()`。检查点从自建 `CheckpointStore` 迁移到 `SqliteSaver`。\n\n**阶段 3：MultiAgentCoordinator → 框架 Agent（全面替换）**\n\n将 `agents.py` 中的 1000 行 Python 类拆分为独立的 Agent 定义 + Task 配置。`PlannerAgent` → 条件路由或 ManagerAgent，`CriticAgent` → 独立 Agent 或 Guardrail。\n\n### 不变的核心资产\n\n无论迁移到哪个框架，以下组件**不需要改动**：\n\n- **diff_parser.py** — 纯解析逻辑，与框架无关\n- **reviewer.py** 中的正则规则 — 确定性审查不依赖 LLM\n- **store.py / postgres_store.py** — 持久化层独立于 Agent 框架\n- **Finding / ReviewReport 数据模型** — 业务模型与编排解耦\n- **auth.py / github.py** — 认证和外部集成是独立关注点\n\n这正是 EvoAgent 架构设计的优势：**审查逻辑和 Agent 编排正交**，迁移框架只需要替换编排层，审查核心完全保留。"
             }
           ]
         }
