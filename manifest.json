@@ -21,7 +21,8 @@
     "17-evaluation.json",
     "18-github-setup.json",
     "19-interview.json",
-    "20-tech-stack.json"
+    "20-tech-stack.json",
+    "21-agent-frameworks.json"
   ],
   "groups": [
     {
@@ -51,8 +52,8 @@
     },
     {
       "title": "附录：实战与面试",
-      "description": "GitHub 端到端连接指南（环境搭建、Token、隧道、Fork 工作流、Webhook 测试与排查）、面试 Q&A、技术选型速查",
-      "files": ["18-github-setup.json", "19-interview.json", "20-tech-stack.json"]
+      "description": "GitHub 端到端连接指南、面试 Q&A、技术选型速查、Agent 框架迁移对照",
+      "files": ["18-github-setup.json", "19-interview.json", "20-tech-stack.json", "21-agent-frameworks.json"]
     }
   ]
 }
