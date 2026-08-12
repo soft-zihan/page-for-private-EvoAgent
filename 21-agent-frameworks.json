@@ -219,6 +219,104 @@
       ]
     },
     {
+      "title": "混合使用策略：哪些该用框架、哪些不该用",
+      "sections": [
+        {
+          "title": "三层分类法",
+          "blocks": [
+            {
+              "type": "text",
+              "content": "实际项目中，框架和自建代码不是二选一的关系，而是**三层嵌套**：\n\n```\n┌─────────────────────────────────────────┐\n│  第三层：编排层 (LangGraph)                │  ← 可以替换\n│  AgentRuntime / AgentLoop / 节点编排      │\n├─────────────────────────────────────────┤\n│  第二层：基础设施层 (LangChain)             │  ← 可以替换\n│  LLM 调用 / Tool 注册 / Memory 存储       │\n├─────────────────────────────────────────┤\n│  第一层：领域逻辑层 (必须自建)               │  ← 不能替换\n│  审查规则 / 证据校验 / 上下文压缩 / 记忆评分   │\n└─────────────────────────────────────────┘\n```\n\n**核心原则**：框架处理「通用模式」，自建代码处理「业务规则」。\n\n| 层次 | 特征 | 能用框架吗？ | EvoAgent 代码量 |\n|------|------|-----------|---------------|\n| 编排层 | 节点执行、重试、检查点 | ✅ LangGraph | ~600行 (runtime.py + harness.py) |\n| 基础设施层 | LLM 调用、工具注册、存储 | ✅ LangChain | ~400行 (reviewer.py LLM部分 + observability.py) |\n| 领域逻辑层 | 业务规则、算法、校验 | ❌ 必须自建 | ~1200行 (审查规则 + 证据校验 + 上下文压缩 + 记忆评分) |"
+            }
+          ]
+        },
+        {
+          "title": "第一层：必须自建（领域逻辑）",
+          "blocks": [
+            {
+              "type": "text",
+              "content": "以下模块是 EvoAgent 的**核心竞争力**，用框架替代会丢失业务价值："
+            },
+            {
+              "type": "table",
+              "table": {
+                "headers": ["模块", "代码位置", "为什么不能用框架"],
+                "rows": [
+                  ["正则审查规则", "reviewer.py:25-79", "6 条确定性规则（SEC-EVAL/SEC-SUBPROCESS-SHELL 等）是纯正则匹配，100% 可靠、零延迟。框架无法提升确定性逻辑"],
+                  ["Diff 解析", "diff_parser.py", "52 行纯解析逻辑，无外部依赖，无框架可替代"],
+                  ["上下文压缩算法", "context_manager.py:79-145", "风险评分 hunk 压缩：按 `risk_domains` + `RISK_TERMS` 打分排序，保留高风险变更行、丢弃低风险上下文。LangChain 的 `text_splitter` 只做 token 截断，不懂代码审查语义"],
+                  ["记忆召回评分", "memory.py:65-102", "自定义 TF-IDF 变体：`coverage * 0.55 + specificity * 0.15 + importance * 0.25`，混合覆盖率、特异性、重要性三个维度。LangChain Memory 只存储，不评分"],
+                  ["Critic 5 项证据检查", "agents.py:250-277", "检查：(1) 位置是否为新增行 (2) 引用证据是否匹配源行 (3) 解释是否够具体 (4) 修复建议是否可执行 (5) 测试策略是否可执行。这是审查质量门禁，不能用 LLM 替代"],
+                  ["证据签名匹配", "agents.py:283-305", "确定性验证：`SEC-EVAL` → `eval(` 或 `exec(` 在行中。纯字符串匹配，不需要 LLM"],
+                  ["Verifier 置信度阈值", "agents.py:341-356", "`confidence < 0.55` 则拒绝。业务决策阈值，硬编码才能保证一致性"],
+                  ["Arbiter 去重排序", "agents.py:362-376", "按 `(path, line, rule_id)` 去重，取高置信度版本，按严重度排序。纯业务逻辑"]
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "title": "第二层：可以用 LangChain（基础设施）",
+          "blocks": [
+            {
+              "type": "text",
+              "content": "以下模块是「通用基础设施」，LangChain 提供了更成熟的实现："
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "caption": "混合使用示例：LLM 调用用 LangChain，结果解析保持自建",
+                "content": "# ── 可以替换的部分：urllib.request → ChatOpenAI ──\n# EvoAgent 当前实现 (reviewer.py:276-304)：\n#   headers = {\"Authorization\": \"Bearer \" + self.api_key, ...}\n#   request = urllib.request.Request(base_url + \"/chat/completions\", ...)\n#   with urllib.request.urlopen(request, timeout=self.timeout) as resp:\n#       body = json.loads(resp.read())\n#   content = body[\"choices\"][0][\"message\"][\"content\"]\n#\n# LangChain 替代（自动重试、超时、流式、多模型）：\nfrom langchain_openai import ChatOpenAI\nllm = ChatOpenAI(\n    model=self.model, temperature=0,\n    max_retries=3, timeout=self.timeout,\n    # 自动处理 429 限流、5xx 重试、连接超时\n)\nresponse = llm.invoke([\n    (\"system\", system_prompt),\n    (\"user\", \"Review this diff:\\n\" + diff),\n])\nresult = json.loads(response.content)\n\n# ── 不能替换的部分：Finding 解析校验保持自建 ──\n# reviewer.py:306-332 的 _parse_findings() 做：\n#   (1) 验证 (path, line) 在 parsed.added_lines 中\n#   (2) Severity 枚举校验\n#   (3) confidence 截断到 [0, 1]\n# 这是业务校验逻辑，LangChain 不做这件事\nfindings = self._parse_findings(result, parsed)  # 保持自建"
+              }
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "caption": "混合使用示例：工具注册用 LangChain，工具逻辑保持自建",
+                "content": "# ── 可以替换的部分：AgentTool 手动定义 → @tool ──\n# EvoAgent 当前实现 (agents.py:499-586)：\n#   AgentTool(\"search_diff\", \"Search...\",\n#             {\"type\":\"object\", \"properties\":{\"query\":{\"type\":\"string\"}}},\n#             handler=search_diff_fn)\n#   + ToolRegistry._validate() 手写参数校验\n#\n# LangChain 替代（自动 Schema + 校验）：\nfrom langchain.tools import tool\n@tool\ndef search_diff(query: str, limit: int = 20) -> list:\n    \"\"\"Search the PR diff for an exact text fragment.\"\"\"\n    ...\n\n# ── 不能替换的部分：工具内部的业务逻辑保持自建 ──\n# search_diff 的实现依赖 state[\"diff\"]（运行时注入），\n# recall_memory 的实现依赖 MemoryManager.recall()（自定义评分算法）\n# 框架只替代「注册 + 校验」，不替代「执行逻辑」"
+              }
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "caption": "混合使用示例：Memory 存储用 LangChain，评分算法保持自建",
+                "content": "# ── 可以替换的部分：存储后端用 LangChain Memory ──\n# EvoAgent 当前 (memory.py:63)：\n#   self.store.save_agent_memory(record)  # 自建 PostgreSQL 表\n#\n# LangChain 替代：\nfrom langchain_community.chat_message_histories import PostgresChatMessageHistory\nchat_memory = PostgresChatMessageHistory(\n    session_id=f\"{tenant_id}:{repository}\",\n    connection_string=DB_URL,\n)\nchat_memory.add_message(content)\n\n# ── 不能替换的部分：recall 评分算法保持自建 ──\n# memory.py:83-102 的自定义评分：\n#   score = coverage * 0.55       # query 与 memory 的 token 重叠率\n#         + specificity * 0.15    # memory 被 query 命中的比例\n#         + importance * 0.25     # 业务重要性（0-1）\n#         + 0.05 / (index + 1)    # 时间衰减\n# LangChain Memory 只存储和检索，不做多维度排序\n# 如果用 LangChain，需要自定义 Retriever 来保留评分逻辑"
+              }
+            }
+          ]
+        },
+        {
+          "title": "第三层：可以用 LangGraph（编排层）",
+          "blocks": [
+            {
+              "type": "text",
+              "content": "编排层是最适合用框架替代的——它处理「通用模式」而非业务逻辑：\n\n| EvoAgent 自建代码 | LangGraph 替代 | 替代后的收益 |\n|-----------------|---------------|------------|\n| `AgentRuntime.execute()` (309行) | `StateGraph.compile() + invoke()` | 获得可视化、时间旅行调试、分布式执行 |\n| `AgentLoop.run()` (75行) | `create_react_agent()` | 获得工具调用追踪、自动重试、流式输出 |\n| `CollaborationBus` (30行) | `Annotated[list, operator.add]` | 节点间自动消息合并，无需手写锁 |\n| `CheckpointStore` (自建 SQL) | `SqliteSaver` / `PostgresSaver` | 框架内置，支持时间旅行恢复 |\n| `runtime.py` 全部 (309行) | 删除 | 框架完全接管 |\n\n**关键**：LangGraph 的节点函数签名 `(state) -> dict` 与 EvoAgent 的 `RuntimeNode.handler` 完全一致，迁移几乎不需要改函数内部逻辑。"
+            }
+          ]
+        },
+        {
+          "title": "实战：混合架构示例",
+          "blocks": [
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "caption": "混合架构：LangGraph 编排 + LangChain 基础设施 + 自建领域逻辑",
+                "content": "# 混合架构示例：一个审查节点的完整实现\n# LangGraph 负责编排，LangChain 负责 LLM，自建代码负责业务规则\n\nfrom langgraph.graph import StateGraph\nfrom langgraph.prebuilt import create_react_agent\nfrom langchain_openai import ChatOpenAI\nfrom langchain.tools import tool\n\n# ══════════ 第一层：自建领域逻辑（不变） ══════════\n# 这些函数从 EvoAgent 原样保留\ndef critic_check(finding, parsed):\n    \"\"\"5 项证据检查——纯业务逻辑，不用框架\"\"\"\n    objections = []\n    valid_locations = {(l.path, l.line) for l in parsed.added_lines}\n    if (finding.path, finding.line) not in valid_locations:\n        objections.append(\"not an added line\")\n    # ... 其他 4 项检查 ...\n    return objections\n\ndef memory_score(query_tokens, memory):\n    \"\"\"自定义评分算法——纯业务逻辑，不用框架\"\"\"\n    memory_tokens = set(memory[\"keywords\"])\n    overlap = len(query_tokens & memory_tokens)\n    coverage = overlap / max(1, len(query_tokens))\n    return coverage * 0.55 + memory[\"importance\"] * 0.25\n\n# ══════════ 第二层：LangChain 基础设施 ══════════\nllm = ChatOpenAI(model=\"gpt-4o\", temperature=0, max_retries=3)\n\n@tool\ndef search_diff(query: str) -> list:\n    \"\"\"Search diff for text.\"\"\"\n    ...  # 内部调用自建的业务逻辑\n\n# ══════════ 第三层：LangGraph 编排 ══════════\nsecurity_agent = create_react_agent(\n    llm, tools=[search_diff],\n    state_modifier=\"You are a security reviewer...\"\n)\n\ndef security_node(state):\n    # LangGraph 调用此函数\n    # 内部用 LangChain 的 Agent 做 LLM 调用\n    # 返回的 findings 经过自建的 critic_check 校验\n    result = security_agent.invoke({\"messages\": state[\"messages\"]})\n    raw_findings = parse_findings(result)\n    # ↓ 自建校验逻辑 ↓\n    verified = [f for f in raw_findings\n                if not critic_check(f, state[\"parsed\"])]\n    return {\"findings\": verified}\n\ngraph = StateGraph(ReviewState)\ngraph.add_node(\"security\", security_node)\n# ... 其他节点 ...\napp = graph.compile()"
+              }
+            },
+            {
+              "type": "text",
+              "content": "**一句话总结**：用 LangGraph 编排节点执行顺序，用 LangChain 处理 LLM 调用和工具注册，但审查规则、证据校验、上下文压缩、记忆评分这些**领域逻辑**永远保持自建。\n\nEvoAgent 的架构已经隐含了这种分层——`runtime.py` 是编排层、`reviewer.py` 的 LLM 部分是基础设施层、`agents.py` 的 CriticAgent/EvidenceAgent/VerifierAgent 是领域逻辑层。迁移到框架时，只需要按这个分层逐层替换，不需要推倒重来。"
+            }
+          ]
+        }
+      ]
+    },
+    {
       "title": "三大框架选型对比",
       "sections": [
         {
