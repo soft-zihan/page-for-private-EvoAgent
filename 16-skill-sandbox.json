@@ -1,0 +1,161 @@
+{
+  "chapters": [
+    {
+      "id": "skill-sandbox",
+      "title": "Skill沙箱",
+      "sections": [
+        {
+          "title": "背景知识：为什么需要 Skill 沙箱",
+          "anchor": "practice-skill-background",
+          "groupTitle": "Skill 沙箱模块",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 8,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "Skill 是用户自定义的审查规则。但用户提交的代码不可信——它可能包含恶意代码（import os; os.system('rm -rf /')）。skills.py（208行）+ skill_runner.py（55行）实现了三层隔离来确保安全。"
+            },
+            {
+              "type": "text",
+              "text": "在深入代码之前，先理解几个核心概念：\n\n**什么是沙箱（Sandbox）？** 沙箱是一种安全机制，让程序在一个受限的环境中运行——就像把小孩放在沙坑里玩，他可以随意折腾，但出不了沙坑的范围。技术上的沙箱会限制程序能访问的文件、网络、内存和 CPU 等资源。\n\n**什么是进程和子进程？** 进程是操作系统中正在运行的一个程序实例。你在电脑上同时开着浏览器、编辑器和终端，每个都是独立的进程。子进程是你的程序「生」出来的另一个进程——就像公司（主进程）派一个员工（子进程）去独立完成任务。子进程有自己独立的内存空间，即使它崩溃了也不会影响主进程。项目用 subprocess.run() 创建子进程来运行 Skill，主进程和 Skill 之间完全隔离。\n\n**什么是 AST（抽象语法树）？** 在 05-diff-parser 教程中已详细解释。简单回顾：AST 把代码解析成树形结构，能理解代码的语法含义（比如区分 `import socket` 是导入语句而不是普通字符串）。项目用 AST 检查 Skill 代码里有没有 import 危险模块。\n\n**什么是 audit hook（审计钩子）？** audit hook 是 Python 3.8+ 提供的安全机制。你可以注册一个回调函数，每当 Python 执行某些敏感操作（打开文件、创建网络连接、启动子进程等）时，这个回调就会被触发。就像大楼的门禁系统——每次有人刷卡进门（触发事件），保安（audit hook）都会检查他的门禁卡是否有权限进入这个房间。项目的 skill_runner.py 用 sys.addaudithook() 拦截所有网络、子进程和文件操作。\n\n**什么是 Docker 容器？** Docker 是一种更高级的隔离技术。如果说子进程像是用隔板把办公室隔开，那 Docker 就像把程序放进一个完全密封的集装箱——集装箱里没有网络、文件系统是只读的、内存有上限。项目可选地用 Docker 运行 Skill，提供比子进程更强的隔离。"
+            }
+          ]
+        },
+        {
+          "title": "第一层隔离：AST 静态分析",
+          "anchor": "practice-skill-ast",
+          "groupTitle": "Skill 沙箱模块",
+          "difficulty": "advanced",
+          "estimatedMinutes": 12,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "在加载 Skill 之前，系统用 ast.parse() 解析源码，检查 import 语句。如果导入了危险模块（subprocess、socket、urllib 等），直接拒绝加载。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# skills.py 第 18-21 行\nFORBIDDEN_IMPORTS = {\n    \"ctypes\", \"multiprocessing\", \"socket\", \"subprocess\",\n    \"urllib\", \"http\", \"ftplib\", \"telnetlib\",\n}\n\n# skills.py 第 179-207 行\n# _validate_manifest：内部辅助方法，供类内部其他方法调用\ndef _validate_manifest(self, manifest, module_path):\n    # 1. 检查 manifest 完整性\n    for field in (\"name\", \"version\", \"entrypoint\", \"sha256\", \"permissions\"):\n        if field not in manifest:\n            raise ValueError(\"skill manifest is missing %s\" % field)\n    \n    # 2. 检查 SHA-256 完整性\n    with open(module_path, \"rb\") as f:\n        source = f.read()\n    digest = hashlib.sha256(source).hexdigest()\n    if not hmac.compare_digest(digest, str(manifest[\"sha256\"])):\n        raise ValueError(\"skill checksum mismatch\")\n    \n    # 3. AST 静态分析：禁止危险 import\n    tree = ast.parse(source, filename=module_path)\n    for node in ast.walk(tree):\n        if isinstance(node, ast.Import):\n            names = [item.name.split(\".\")[0] for item in node.names]\n        elif isinstance(node, ast.ImportFrom):\n            names = [(node.module or \"\").split(\".\")[0]]\n        else:\n            continue\n        \n        # 初始化线程锁 blocked，保证并发安全\n        blocked = FORBIDDEN_IMPORTS.intersection(names)\n        if blocked:\n            raise ValueError(\"skill imports forbidden modules: %s\" % \", \".join(sorted(blocked)))",
+                "caption": "AST 静态分析：禁止危险 import + SHA-256 完整性校验"
+              }
+            }
+          ]
+        },
+        {
+          "title": "第二层隔离：进程沙箱",
+          "anchor": "practice-skill-process",
+          "groupTitle": "Skill 沙箱模块",
+          "difficulty": "advanced",
+          "estimatedMinutes": 15,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "即使通过了 AST 检查，Skill 仍可能在运行时尝试危险操作（例如动态 import）。第二层隔离是在独立子进程中运行 Skill，通过 JSON stdin/stdout 通信，主进程完全隔离。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# skills.py 第 34-100 行\n# SandboxedSkillReviewer：核心类，封装了系统的关键行为和状态\nclass SandboxedSkillReviewer(Reviewer):\n    def review(self, diff, parsed) -> List[Finding]:\n        payload = {\n            \"diff\": diff,\n            \"parsed\": {\"files\": parsed.files, \"added_lines\": [...]},\n            \"memory_mb\": self.memory_mb,\n        }\n        \n        with tempfile.TemporaryDirectory(prefix=\"evoagent-skill-\") as workdir:\n            # 清理环境变量，只保留必要项\n            env = {k: v for k, v in os.environ.items()\n                   if k in {\"PATH\", \"SYSTEMROOT\", \"WINDIR\", \"LANG\", \"LC_ALL\", \"TMP\", \"TEMP\"}}\n            env[\"PYTHONHASHSEED\"] = \"0\"  # 确定性哈希\n            \n            command = [sys.executable, \"-I\", self.runner, self.module_path]\n            \n            # Docker 模式：额外隔离\n            if self.container_image:\n                command = [\n                    \"docker\", \"run\", \"--rm\", \"-i\",\n                    \"--network\", \"none\",           # 无网络\n                    \"--read-only\",                  # 只读文件系统\n                    \"--cap-drop\", \"ALL\",            # 删除所有 Linux 能力\n                    \"--security-opt\", \"no-new-privileges\",\n                    \"--pids-limit\", \"64\",           # 限制进程数\n                    \"--memory\", \"%dm\" % self.memory_mb,\n                    \"--cpus\", \"0.5\",                # 限制 CPU\n                    \"-v\", package_root + \":/app:ro\",\n                    \"-v\", skill_root + \":/skill:ro\",\n                    self.container_image, \"python\", \"-I\",\n                    \"/app/evoagent/skill_runner.py\", \"/skill/\" + os.path.basename(self.module_path),\n                ]\n            \n            result = subprocess.run(\n                command, input=json.dumps(payload), text=True,\n                capture_output=True, cwd=workdir, env=env,\n                timeout=self.timeout_seconds, check=False,\n            )\n        \n        if result.returncode != 0:\n            raise RuntimeError(\"skill failed in sandbox: %s\" % result.stderr[-1000:])\n        \n        return [Finding(**item) for item in json.loads(result.stdout)]",
+                "caption": "进程沙箱：独立子进程 + Docker 隔离（可选）"
+              }
+            }
+          ]
+        },
+        {
+          "title": "第三层隔离：运行时审计钩子",
+          "anchor": "practice-skill-audit",
+          "groupTitle": "Skill 沙箱模块",
+          "difficulty": "advanced",
+          "estimatedMinutes": 10,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "即使 Skill 绕过了 AST 检查（例如使用 __import__() 动态导入），第三层隔离也能拦截。skill_runner.py 使用 sys.addaudithook() 在运行时拦截所有系统调用。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# skill_runner.py 第 28-36 行\n# audit：公开方法，实现核心业务逻辑\ndef audit(event, args):\n    # 拦截网络、子进程、系统命令\n    if event.startswith((\"socket.\", \"subprocess.\", \"os.system\")):\n        raise PermissionError(\"operation blocked by skill sandbox\")\n    \n    # 拦截文件访问（只允许访问白名单目录）\n    if event == \"open\" and args:\n        path = os.path.abspath(str(args[0]))\n        allowed_roots = {\n            os.path.dirname(module_path),     # Skill 自身目录\n            os.path.abspath(os.getcwd()),     # 工作目录\n            os.path.abspath(sys.prefix),      # Python 安装目录\n            os.path.abspath(sys.base_prefix), # Python 基础目录\n            package_root,                      # EvoAgent 包目录\n        }\n        if not any(path == root or path.startswith(root + os.sep) for root in allowed_roots):\n            raise PermissionError(\"file access blocked by skill sandbox\")\n\nsys.addaudithook(audit)\n\n# 资源限制（Unix 系统）\nif os.name != \"nt\":\n    # 导入 resource 模块，提供必要的工具和类型定义\n    import resource\n    memory = int(payload.get(\"memory_mb\", 256)) * 1024 * 1024\n    resource.setrlimit(resource.RLIMIT_AS, (memory, memory))      # 内存限制\n    resource.setrlimit(resource.RLIMIT_CPU, (30, 30))             # CPU 时间限制",
+                "caption": "运行时审计：拦截系统调用 + 文件访问白名单 + 资源限制"
+              }
+            }
+          ]
+        },
+        {
+          "title": "Skill 加载流程与 Code Quality 示例",
+          "anchor": "practice-skill-loading",
+          "groupTitle": "Skill 沙箱模块",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 12,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "SkillRegistry 保存两类信息：name → Reviewer 实例，name → SkillInfo（包含 name、version、description、source）。内置 Reviewer 通过 register() 注册，磁盘 Skill 通过 reload() 扫描。加载顺序：扫描 skills 目录 → 找到子目录里的 skill.py → importlib.util.spec_from_file_location() → 执行模块 → 调用 create_skill() → register()。名称把 - 替换为 _ 后必须是合法 Python 标识符。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "text",
+                "content": "skills/  # Skill 根目录，由 EVOAGENT_SKILLS_DIR 配置项指定\n└── code-quality/  # 每个子目录代表一个独立的 Skill 模块\n    ├── SKILL.md        # 说明文件（frontmatter 是 Markdown 文件头部用 --- 包裹的元数据区域，Registry 不读取它）\n    ├── skill.json      # manifest 清单文件（name、version、entrypoint、sha256、permissions）\n    └── skill.py        # 实际执行代码，必须提供 create_skill() 工厂函数返回 Reviewer 实例",
+                "caption": "Skill 目录结构"
+              }
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# skill.py 提供的入口\nSKILL_NAME = \"code-quality\"\nSKILL_VERSION = \"1.0.0\"\nSKILL_DESCRIPTION = \"Detects unfinished TODO/FIXME markers\"\n\n# CodeQualitySkill：核心类，封装了系统的关键行为和状态\nclass CodeQualitySkill(Reviewer):\n    name = \"code-quality\"\n    def review(self, diff, parsed):\n        findings = []\n        for line in parsed.added_lines:\n            if line.path.startswith(\"tests/\"):\n                continue  # 跳过测试文件\n            if \"TODO\" in line.content or \"FIXME\" in line.content:\n                findings.append(Finding(\n                    rule_id=\"QUALITY-UNFINISHED\",\n                    severity=Severity.LOW,\n                    path=line.path, line=line.line,\n                    evidence=line.content.strip()[:240],\n                    fix=\"Complete the TODO or remove the marker.\",\n                    test=\"Verify the implementation is complete.\",\n                    confidence=0.8,\n                ))\n        return findings\n\n# create_skill：公开方法，实现核心业务逻辑\ndef create_skill():\n    return CodeQualitySkill()",
+                "caption": "Code Quality Skill：检测 TODO/FIXME 标记"
+              }
+            },
+            {
+              "type": "text",
+              "text": "动态 Skill 和内置 reviewer 在 Coordinator 看来都是 Reviewer。隔离和 manifest 校验发生在进入协作池之前。进化后的 Skill（evolved- 开头）是声明式规则，不是任意 Python 代码，激活前在 validation 和 holdout 数据集上回放检查。"
+            }
+          ]
+        },
+        {
+          "title": "热重载与安全边界",
+          "anchor": "practice-skill-reload",
+          "groupTitle": "Skill 沙箱模块",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 8,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "调用 POST /v1/skills/reload 会重新扫描目录，然后重建 MultiAgentCoordinator 和 ReviewHarness。新任务使用新的 Reviewer 集合。但当前 reload() 不会先清空注册表——一个 Skill 文件从磁盘删除后，旧实例可能仍留在内存中。最稳妥的移除方式是重启服务。"
+            },
+            {
+              "type": "text",
+              "text": "需要注意两条不同的 Skill 执行路径：(1) SandboxedSkillReviewer 路径——Skill 在独立子进程或 Docker 容器中运行，享有前面介绍的三层隔离（AST 静态分析 + 进程隔离 + 运行时审计钩子）；(2) reload() 直接导入路径——当 SkillRegistry.reload() 扫描到磁盘上的 Skill 目录时，它创建的是 SandboxedSkillReviewer 实例，但如果配置了 skill_sandbox=false，则 Skill 代码直接在主进程中执行，此时没有任何沙箱保护。因此，生产环境必须保持 EVOAGENT_SKILL_SANDBOX=true，不应加载不可信来源的 Skill。"
+            },
+            {
+              "type": "text",
+              "text": "注册前的安全检查清单：(1) manifest 必须有 name、version、entrypoint、sha256 和 permissions；(2) entrypoint 不能逃出 skill 目录；(3) 当前 review skill 不允许声明 host permissions；(4) 代码摘要必须匹配 manifest；(5) 如果配置了 signing key，签名也必须匹配；(6) 禁止导入 socket、subprocess、urllib、http 等模块。"
+            }
+          ]
+        },
+        {
+          "title": "模块总结",
+          "anchor": "practice-skill-summary",
+          "groupTitle": "Skill 沙箱模块",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 3,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "Skill 沙箱的设计原则：(1) 纵深防御（Defense in Depth）——多层安全机制，每层独立，攻击者必须同时绕过所有层才能突破。就像城堡的多重防线：护城河、城墙、内堡，即使敌人突破一层，后面还有更多层；(2) 最小权限——Skill 只能读取自身目录和 Python 标准库，不能访问网络、子进程、其他文件；(3) 资源限制——内存和 CPU 时间都有硬限制，防止 DoS（Denial of Service，拒绝服务攻击）——通过耗尽系统资源（CPU/内存）使正常用户无法获得服务；(4) 确定性——PYTHONHASHSEED=0 保证哈希结果可复现。这种沙箱设计让系统可以安全地加载用户自定义的审查规则。"
+            },
+            {
+              "type": "text",
+              "text": "所有功能模块已就绪。但如何证明新版本比旧版本更好？下一章的评测系统提供严格的答案——用受控数据集和客观指标衡量审查质量。"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

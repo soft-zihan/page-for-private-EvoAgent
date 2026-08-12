@@ -1,0 +1,308 @@
+{
+  "chapters": [
+    {
+      "id": "evolution",
+      "title": "进化引擎",
+      "sections": [
+        {
+          "title": "背景知识：反馈驱动的自我进化",
+          "anchor": "practice-evolution-background",
+          "groupTitle": "进化引擎模块",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 10,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "EvoAgent 有两套独立的进化系统：(1) EvolutionEngine 进化 LLM 提示词（prompt evolution）；(2) SkillEvolutionEngine 进化声明式 Skill 规则。两者共享相同的设计哲学：候选版本必须在验证集上提升、在隐藏集上非退化才能激活。"
+            },
+            {
+              "type": "text",
+              "text": "为什么需要两套独立的进化链？因为它们改变的东西不同：提示词进化改变 LLM 的系统提示（影响模型行为但不精确），Skill 进化改变确定性规则（精确匹配但表达力有限）。两者互补：LLM 处理模糊的、需要推理的问题，Skill 处理已确认的、可以精确匹配的模式。"
+            },
+            {
+              "type": "text",
+              "text": "**进化算法与生物进化的类比**：EvolutionEngine 的设计灵感来自达尔文的自然选择理论。整个过程可以类比为：(1) **变异**——LLM 根据误报案例生成新的提示词候选（就像基因突变产生新性状）；(2) **适应度评估**——用验证集评测候选的 F1 分数（就像生物在环境中的生存能力）；(3) **自然选择**——只有 F1 提升 ≥ 阈值的候选才能激活（适者生存，不适者被淘汰）；(4) **遗传**——激活的新提示词成为下一轮进化的起点（有利性状被保留给后代）。隐藏集则相当于「新环境测试」——生物在原生环境适应得好，不代表在新环境也能生存。"
+            },
+            {
+              "type": "text",
+              "text": "在深入代码之前，先理解几个机器学习评估概念：\n\n**什么是验证集和隐藏集？** 验证集（Validation Set）和隐藏集（Holdout Set）是把测试数据分成两份做法。验证集用来在进化过程中挑选最好的候选版本；隐藏集完全不参与进化过程，只在最后做「期末考试」——确保新版本不是只在验证集上表现好（过拟合），而是在未见过的数据上也好。类比：验证集是平时的模拟考，隐藏集是高考——高考题目在考前绝不泄露。\n\n**什么是 Precision / Recall / F1？** 这三个指标衡量审查器的准确性：\n- **Precision（精确率）**= 报告的问题中真正有问题的比例。类比：消防报警中真正着火的次数 / 总报警次数。精确率低 = 误报多。\n- **Recall（召回率）**= 真正有问题的数量中被发现的比例。类比：真正着火的次数中被报警的次数 / 真正着火的总次数。召回率低 = 漏报多。\n- **F1** = Precision 和 Recall 的调和平均数。单独看 Precision 或 Recall 都有偏颇（只报高风险 → 高精确低召回；什么都报 → 高召回低精确），F1 综合衡量两者。\n\n**什么是过拟合？** 过拟合（Overfitting）是指候选版本在验证集上表现很好，但在新的、未见过的数据上表现很差。就像学生把模拟考的答案背下来了，模拟考满分，但高考遇到新题就不会了。隐藏集就是为了检测过拟合。"
+            }
+          ]
+        },
+        {
+          "title": "案例：小王的误报如何改变系统行为",
+          "anchor": "practice-evolution-case-study",
+          "groupTitle": "进化引擎模块",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 12,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "让我们跟踪 PR #42 的后续故事，看反馈如何驱动系统进化。"
+            },
+            {
+              "type": "text",
+              "text": "**第 1 天**：PR #42 审查完成，报告包含 5 个 Finding。小王认为其中 REL-DEBUG-PRINT（第 9 行的 print 语句）是误报——那是他故意加的调试日志，在开发阶段是合理的。"
+            },
+            {
+              "type": "text",
+              "text": "**第 1 天（续）**：小王在管理台的「审查反馈」区域提交反馈："
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "json",
+                "content": "POST /v1/tasks/{task_id}/feedback  // API 端点：提交审查反馈\n{\n    \"category\": \"false_positive\",  // 反馈类别：误报（还有 missed_issue/bad_fix 两种）\n    \"finding\": {                    // 被标记为误报的 Finding 详情\n        \"rule_id\": \"REL-DEBUG-PRINT\",  // 规则 ID：调试输出检测\n        \"path\": \"deploy.py\",            // 文件路径\n        \"line\": 9,                      // 行号\n        \"severity\": \"low\",              // 严重级别：低\n        \"evidence\": \"print(f\\\"Deploying to {env} with key {API_KEY}\\\")\"  // 证据：实际代码行\n    }\n    // 提交后存入 failure_cases 表，resolved=false（未解决）\n    // EvolutionEngine 在下次进化时会读取这些未解决的反馈作为学习信号\n}",
+                "caption": "小王提交误报反馈"
+              }
+            },
+            {
+              "type": "text",
+              "text": "**第 2 天**：团队负责人又提交了几个 PR 的审查，其中也有类似的 REL-DEBUG-PRINT 误报（开发阶段的调试日志）。系统积累了 3 条 false_positive 反馈。"
+            },
+            {
+              "type": "text",
+              "text": "**第 3 天**：有人调用 `POST /v1/evolution/auto` 触发自动进化。EvolutionEngine.auto_propose() 开始工作："
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "text",
+                "content": "# ===== EvolutionEngine.auto_propose() 从误报中提取学习信号并激活新版本 =====\n# 整个流程：读取反馈 → 生成学习指令 → 候选提示词 → 回放评测 → 门禁判断 → 激活/拒绝\n\nauto_propose() 执行流程：\n\n# --- 步骤 1-2：读取未解决的反馈并统计 ---\n1. 读取未解决的 failure_cases → 找到 3 条 false_positive（都是 REL-DEBUG-PRINT）  # 从数据库查询 resolved=false 的记录\n2. 统计反馈类别：{false_positive: 3, missed_issue: 0, bad_fix: 0}  # 按类别计数\n\n# --- 步骤 3-4：生成学习指令并追加到候选提示词 ---\n# 误报反馈 → 系统学到\"减少仅凭风格的报告\"\n3. 生成学习指令：\n   \"Avoid style-only findings and require direct evidence from an added line.\"\n   # 因为 false_positive > 0，系统推断：需要更严格的证据标准\n4. 当前提示词中没有这条指令 → 追加到候选提示词  # 在基础提示词后添加 \"Learned constraints\" 段落\n\n# --- 步骤 5：回放评测（系统自己真实回放，不接受外部分数） ---\n# 用候选和基线分别回放验证集，计算 F1 等指标\n5. 回放评测：\n   - baseline（旧提示词）: score = 0.72  # 基线分数\n   - candidate（新提示词）: score = 0.75（减少了误报，F1 提升）  # 候选分数提升了 0.03\n\n# --- 步骤 6：四重门禁检查 ---\n# 安全性 + 验证集提升 + 验证集非退化 + 隐藏集非退化\n6. 门禁检查：\n   ✅ 安全性通过（候选不包含注入指令）  # 检查不含 'ignore previous'/'disable safety' 等\n   ✅ 验证集提升 0.03 > min_improvement 0.01  # 提升幅度超过最小阈值\n   ✅ 验证集非退化（precision/recall/high_severity_recall 未下降）  # 受保护指标不能变差\n   ✅ 隐藏集非退化  # 在未参与进化的数据上也不变差（防过拟合）\n\n# --- 步骤 7-8：激活新版本并标记反馈为已解决 ---\n7. 决定：activated → 新版本提示词被激活  # 存入 skill_versions 表，active=1\n8. 3 条 false_positive 被标记为 resolved  # failure_cases.resolved = true",
+                "caption": "auto_propose() 从误报中提取学习信号并激活新版本"
+              }
+            },
+            {
+              "type": "text",
+              "text": "**第 3 天（续）**：下一个 PR 提交时，LLM 使用的是更新后的提示词。新提示词中多了「避免仅凭代码风格报告，要求直接证据」的约束。当 LLM 看到类似的 `print(f\"debug: {value}\")` 时，它会更谨慎——考虑到这可能是开发阶段的合理调试日志，不再自动报告为 REL-DEBUG-PRINT。"
+            },
+            {
+              "type": "text",
+              "text": "**同时，Skill 进化也在进行**：如果团队使用 SkillEvolutionEngine，误报反馈会导致不同的结果。Skill 进化不是修改 LLM 提示词（模糊的行为改变），而是修改声明式规则（精确的匹配改变）。如果某条 evolved 规则反复被标记为误报，auto_propose() 会直接移除该规则——下次遇到完全相同的模式时，不会再报告。"
+            },
+            {
+              "type": "table",
+              "table": {
+                "headers": [
+                  "时间",
+                  "事件",
+                  "系统状态变化"
+                ],
+                "rows": [
+                  [
+                    "第 1 天",
+                    "小王提交 REL-DEBUG-PRINT 误报",
+                    "failure_cases 表新增 1 条记录，resolved=false"
+                  ],
+                  [
+                    "第 2 天",
+                    "团队又积累 2 条类似误报",
+                    "failure_cases 共 3 条 false_positive"
+                  ],
+                  [
+                    "第 3 天",
+                    "POST /v1/evolution/auto",
+                    "提示词 v2 被激活，追加了减少误报的约束"
+                  ],
+                  [
+                    "第 3 天",
+                    "3 条反馈被 resolve",
+                    "failure_cases.resolved = true"
+                  ],
+                  [
+                    "第 4 天起",
+                    "新 PR 审查使用提示词 v2",
+                    "LLM 对 print 语句更谨慎，误报减少"
+                  ],
+                  [
+                    "未来",
+                    "如果出现新的漏报模式",
+                    "missed_issue 反馈 → 提示词 v3 增加检查"
+                  ]
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "title": "EvolutionEngine：提示词进化与门禁",
+          "anchor": "practice-evolution-prompt",
+          "groupTitle": "进化引擎模块",
+          "difficulty": "advanced",
+          "estimatedMinutes": 20,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "EvolutionEngine 的核心流程：从失败案例中提取学习信号 → 生成候选提示词 → 在验证集和隐藏集上回放评测 → 门禁判断 → 激活或拒绝。关键设计：候选提示词不接受调用方提供的回归分数，系统必须自己真实回放。"
+            },
+            {
+              "type": "callchain",
+              "callchain": {
+                "endpoint": "POST /v1/evolution/auto",
+                "steps": [
+                  {
+                    "layer": "信号提取",
+                    "component": "auto_propose",
+                    "file": "evolution.py",
+                    "description": "从未解决的 failure_cases 中提取学习指令（false_positive→减少误报，missed_issue→增加检查）"
+                  },
+                  {
+                    "layer": "候选生成",
+                    "component": "propose",
+                    "file": "evolution.py",
+                    "description": "在基础提示词后追加 'Learned constraints' 段落，生成候选提示词"
+                  },
+                  {
+                    "layer": "安全检查",
+                    "component": "safety_evaluate",
+                    "file": "evolution.py",
+                    "description": "检查候选不包含 'ignore previous'、'disable safety' 等注入指令"
+                  },
+                  {
+                    "layer": "验证集回放",
+                    "component": "RegressionEvaluator.run",
+                    "file": "evolution.py",
+                    "description": "用候选和基线分别回放验证集，计算 precision/recall/F1/severity_accuracy"
+                  },
+                  {
+                    "layer": "隐藏集回放",
+                    "component": "RegressionEvaluator.run",
+                    "file": "evolution.py",
+                    "description": "用候选和基线分别回放隐藏集，检查非退化"
+                  },
+                  {
+                    "layer": "门禁判断",
+                    "component": "_propose gates",
+                    "file": "evolution.py",
+                    "description": "验证集提升 + 验证集非退化 + 隐藏集非退化 → activated；否则 rejected"
+                  },
+                  {
+                    "layer": "版本保存",
+                    "component": "store.save_skill_version",
+                    "file": "store.py",
+                    "description": "保存版本链，activated 版本设为 active"
+                  }
+                ]
+              }
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# 门禁判断的核心逻辑\n# _propose：内部辅助方法，供类内部其他方法调用\ndef _propose(self, skill_name, prompt, regression_score):\n    # 安全检查\n    safety = self.safety_evaluate(prompt)\n    if not safety[\"safety_passed\"] or safety[\"completeness\"] < 1.0:\n        decision = \"rejected\"\n    # 真实回放评测\n    evaluator = RegressionEvaluator(self.reviewer_factory)\n    baseline_metrics = evaluator.run(baseline_prompt, cases)\n    candidate_metrics = evaluator.run(prompt, cases)\n    baseline_holdout = evaluator.run(baseline_prompt, holdout_cases)\n    candidate_holdout = evaluator.run(prompt, holdout_cases)\n    # 门禁条件\n    improved = candidate_metrics[\"score\"] >= baseline_metrics[\"score\"] + self.min_improvement\n    validation_safe = self._non_regressing(candidate_metrics, baseline_metrics)\n    holdout_safe = self._non_regressing(candidate_holdout, baseline_holdout)\n    if no_errors and improved and validation_safe and holdout_safe:\n        decision = \"activated\"\n    else:\n        decision = \"rejected\"",
+                "caption": "提示词进化门禁：安全 + 提升 + 非退化三重检查"
+              }
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# RegressionEvaluator 计算 7 个指标\ndef run(self, prompt, cases):\n    for case in cases:\n        findings = reviewer.review(case[\"diff\"], parsed)\n        tp += 1 if matched else 0\n        # 初始化字典 fp +，用于存储键值对数据\n        fp += unmatched_predictions\n        fn += unmatched_expectations\n    precision = tp / (tp + fp)\n    recall = tp / (tp + fn)\n    f1 = 2 * precision * recall / (precision + recall)\n    severity_accuracy = severity_hits / matched\n    clean_accuracy = clean_hits / clean_total\n    high_severity_recall = high_hits / high_total\n    # 综合分数 = F1*0.65 + severity*0.15 + clean*0.20，再乘以 success_rate\n    # 当验证集同时包含正样本和干净样本时:\n    score = (f1 * 0.65 + severity_accuracy * 0.15 + clean_accuracy * 0.20) * success_rate",
+                "caption": "评测指标：F1 + 严重级别准确率 + 干净样本准确率"
+              }
+            }
+          ]
+        },
+        {
+          "title": "SkillEvolutionEngine：声明式规则进化",
+          "anchor": "practice-evolution-skill",
+          "groupTitle": "进化引擎模块",
+          "difficulty": "advanced",
+          "estimatedMinutes": 15,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "SkillEvolutionEngine 进化的不是提示词，而是声明式规则 artifact。每个 artifact 包含一组 {rule_id, severity, match, ...} 规则。关键安全设计：规则只支持字面匹配（不支持正则、代码执行），Skill 名称必须以 evolved- 开头，不允许任何主机权限。"
+            },
+            {
+              "type": "text",
+              "text": "在执行任何进化逻辑之前，validate_artifact() 对 artifact 执行严格的输入校验——这是安全边界。它检查：(1) name 必须以 evolved- 开头且只包含合法字符；(2) rules 是列表且不超过 100 条；(3) 每条 rule_id 必须匹配 `[A-Z][A-Z0-9_-]{1,79}`；(4) match 必须是单行非空字符串且不超过 240 字符；(5) 不允许重复规则（rule_id + match + ignore_case 三元组唯一）；(6) confidence 在 0-1 之间；(7) 路径过滤器是字符串列表且每项不超过 200 字符。校验通过后返回规范化后的 artifact（排序规则、截断长文本、填充默认值）。"
+            },
+            {
+              "type": "text",
+              "text": "DeclarativeSkillReviewer 是 validate_artifact 的消费者——它接收已验证的 artifact，遍历每条新增行和每条规则，执行字面匹配。如果匹配命中且路径过滤器通过，就生成 Finding。注意它不使用 eval()、import 或 subprocess——纯粹的字符串匹配，零代码执行风险。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# 声明式 Skill artifact 结构\n{\n    \"schema_version\": 1,\n    \"name\": \"evolved-review\",\n    \"description\": \"Confirmed project-specific review rules\",\n    \"permissions\": [],          # 永远为空——无主机权限\n    \"rules\": [\n        {\n            \"rule_id\": \"SEC-DANGEROUS-CALL\",   # 必须匹配 [A-Z][A-Z0-9_-]{1,79}\n            \"severity\": \"high\",\n            \"match\": \"dangerous_call(data)\",    # 字面匹配，不支持正则\n            \"ignore_case\": false,\n            \"include_paths\": [],\n            \"exclude_paths\": [\"tests/\"],\n            \"title\": \"Dangerous call\",\n            \"explanation\": \"A confirmed unsafe API was added.\",\n            \"fix\": \"Use the constrained API.\",\n            \"test\": \"Add a regression test.\",\n            \"confidence\": 0.85\n        }\n    ]\n}",
+                "caption": "声明式 Skill artifact：只支持字面匹配，无代码执行能力"
+              }
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# auto_propose：公开方法，实现核心业务逻辑\ndef auto_propose(self, skill_name, tenant_id):\n    # 初始化列表 failures，用于收集/存储多条数据\n    failures = self.store.list_failure_cases(True, 100, tenant_id)\n    active = self.store.get_active_skill_artifact(skill_name, tenant_id)\n    # 初始化字典 artifact，用于存储键值对数据\n    artifact = dict(active[\"artifact\"]) if active else self.empty_artifact(skill_name)\n    # 初始化字典 rules，用于存储键值对数据\n    rules = [dict(item) for item in artifact[\"rules\"]]\n\n    for case in failures:\n        finding = (case.get(\"payload\") or {}).get(\"finding\") or {}\n        rule_id = str(finding.get(\"rule_id\", \"\")).strip().upper()\n        if case.get(\"category\") == \"false_positive\":\n            # 误报反馈 → 移除对应规则\n            rules = [r for r in rules if r[\"rule_id\"] != rule_id]\n        elif case.get(\"category\") == \"missed_issue\":\n            # 漏报反馈 → 新增规则（从 evidence 提取字面匹配模式）\n            evidence = str(finding.get(\"evidence\", \"\")).strip()\n            if not evidence:\n                evidence = self._evidence_from_task(case[\"task_id\"], finding)\n            rules.append(normalized_rule)\n\n    candidate = validate_artifact({**artifact, \"rules\": rules}, skill_name)\n    return self.propose(skill_name, candidate, tenant_id)  # 同样的回放门禁",
+                "caption": "Skill 自动进化：误报→移除规则，漏报→新增规则"
+              }
+            }
+          ]
+        },
+        {
+          "title": "evolution_proof.py：可审计的进化证明",
+          "anchor": "practice-evolution-proof",
+          "groupTitle": "进化引擎模块",
+          "difficulty": "advanced",
+          "estimatedMinutes": 15,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "evolution_proof.py（426行）解决了一个关键问题：如何证明 EvoAgent 的反馈→提示词版本→回放→激活循环确实在受控条件下改变了 Agent 行为？它使用确定性的 PromptPolicyReviewer 而非外部 LLM，生成可复现的进化实验报告。报告明确标注「受控离线行为进化」，不声称外部 LLM 权重提升。"
+            },
+            {
+              "type": "text",
+              "text": "核心设计：(1) generate_prompt_evolution_cases() 生成 10 个仓库的测试语料，其中仓库 1-8 用于 validation，仓库 9-10 用于 holdout——holdout 数据绝不参与候选提示词构建；(2) PromptPolicyReviewer 通过 [focus-rule:RULE_ID] 标签控制审查范围，模拟提示词变化如何改变审查行为；(3) run_prompt_evolution_proof() 执行完整流程：导入案例→收集反馈→auto_propose→验证门禁→生成审计报告。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# evolution_proof.py - PromptPolicyReviewer：确定性提示词策略审查器\n# PromptPolicyReviewer：核心类，封装了系统的关键行为和状态\nclass PromptPolicyReviewer(Reviewer):\n    \"\"\"审查范围完全由提示词版本决定，不依赖外部 LLM\"\"\"\n    name = \"prompt-policy-reviewer\"\n\n    def __init__(self, prompt: str):\n        self.prompt = prompt\n        # 从提示词中提取 [focus-rule:XXX] 标签，决定关注哪些规则\n        # 初始化集合 focus_rules: Set[str]，用于去重和快速查找\n        self.focus_rules: Set[str] = set(FOCUS_RULE.findall(prompt))\n        self.local = LocalRuleReviewer()       # 基础规则审查\n        self.context = ContextRuleReviewer()    # 上下文规则审查\n\n    def review(self, diff: str, parsed) -> List[Finding]:\n        findings = list(self.local.review(diff, parsed))\n        # 只添加 focus_rules 中指定的上下文规则发现\n        findings.extend(\n            finding for finding in self.context.review(diff, parsed)\n            if finding.rule_id in self.focus_rules\n        )\n        # 按 (rule_id, path, line) 去重\n        # 初始化字典 deduplicated，用于存储键值对数据\n        deduplicated = {}\n        for finding in findings:\n            key = (finding.rule_id, finding.path, int(finding.line))\n            deduplicated[key] = finding\n        return list(deduplicated.values())",
+                "caption": "PromptPolicyReviewer：提示词中的 focus-rule 标签控制审查范围"
+              }
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# run_prompt_evolution_proof() 核心流程\n# run_prompt_evolution_proof：公开方法，实现核心业务逻辑\ndef run_prompt_evolution_proof(dataset_path: str, database_path: str):\n    # 初始化集合 cases，用于去重和快速查找\n    cases = load_jsonl(dataset_path)\n    store = TaskStore(database_path)\n\n    # 1. 导入案例到评估库\n    for case in converted:\n        store.save_evaluation_case(case[\"name\"], case[\"split\"], ...)\n\n    # 2. 基线回放：用默认提示词在 validation 集上评测\n    baseline_validation = RegressionEvaluator(PromptPolicyReviewer).run(\n        DEFAULT_PROMPT, store.list_evaluation_cases(\"validation\", ...)\n    )\n    store.save_skill_version(\"llm-review\", DEFAULT_PROMPT, score, activate=True)\n\n    # 3. 收集反馈：用基线提示词审查 validation 案例，记录漏报\n    feedback = _collect_feedback(store, cases, DEFAULT_PROMPT)\n\n    # 4. 自动进化：EvolutionEngine 读取漏报，生成候选提示词\n    engine = EvolutionEngine(store, reviewer_factory=PromptPolicyReviewer, ...)\n    result = engine.auto_propose(\"llm-review\")\n\n    # 5. 生成审计报告：包含 validation/holdout 指标对比、版本链、门禁结果\n    return {\n        \"claim_scope\": {\"level\": \"controlled-offline-behavioral-evolution\"},\n        \"release_gate\": {\n            \"quantitative_passed\": result[\"decision\"] == \"activated\",\n            \"production_activation_allowed\": quantitative_passed and provenance_passed\n        }\n    }",
+                "caption": "run_prompt_evolution_proof()：从案例生成到审计报告的完整流程"
+              }
+            },
+            {
+              "type": "text",
+              "text": "报告的关键安全设计：(1) claim_scope 明确声明「证明受控离线行为进化，不证明外部 LLM 权重提升」；(2) release_gate 区分 quantitative_passed（数值门禁通过）和 production_data_provenance_passed（数据来源为真实 GitHub PR）——只有两者同时通过才允许生产激活；(3) 数据集 SHA-256 指纹确保回放可复现；(4) render_markdown() 生成人类可读的 Markdown 报告，包含 validation/holdout 指标对比表和版本审计链。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# _collect_feedback()：收集 validation 集上的漏报作为进化信号\n# _collect_feedback：内部辅助方法，供类内部其他方法调用\ndef _collect_feedback(store, cases, prompt):\n    reviewer = PromptPolicyReviewer(prompt)\n    feedback = []\n    for case in cases:\n        if case[\"split\"] != \"validation\":\n            continue  # holdout 案例不参与反馈收集\n        parsed = parse_unified_diff(case[\"diff\"])\n        findings = reviewer.review(case[\"diff\"], parsed)\n        matches = one_to_one_match(case[\"expected_findings\"], findings)\n        matched = {item.expected_index for item in matches}\n        for index, expected in enumerate(case[\"expected_findings\"]):\n            if index in matched:\n                continue  # 已匹配，不是漏报\n            # 记录漏报为 failure_case，供 EvolutionEngine 学习\n            store.record_failure_case(task_id, \"missed_issue\", {\n                \"finding\": finding, \"note\": \"Confirmed validation false negative\"\n            })\n            feedback.append({\"task_id\": task_id, \"finding\": finding})\n    return feedback",
+                "caption": "反馈收集：只使用 validation 集，holdout 绝不参与"
+              }
+            }
+          ]
+        },
+        {
+          "title": "模块总结",
+          "anchor": "practice-evolution-summary",
+          "groupTitle": "进化引擎模块",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 5,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "进化引擎模块的设计原则：(1) 真实回放——候选必须通过系统自己的回放评测，不接受外部声称的分数；(2) 隐藏集保护——隐藏集只返回聚合指标，不暴露案例详情，防止过拟合；(3) 非退化门禁——受保护指标（precision、recall、high_severity_recall、clean_accuracy）不允许退化；(4) 安全优先——提示词禁止注入指令，Skill 禁止代码执行和主机权限；(5) 版本审计——所有评测运行、版本、指标和激活决定均持久化，支持回滚；(6) 可证明进化——evolution_proof.py 提供受控环境下的可审计进化证据，明确区分「行为改变」和「LLM 权重提升」。→ 延伸阅读：评测回放使用的 EndToEndEvaluationHarness 详见 17-评测教程；进化后的 Skill 如何注入 MultiAgentCoordinator 详见 08-多Agent 教程。"
+            },
+            {
+              "type": "text",
+              "text": "进化引擎让系统能自我改进。但各模块需要一个统一的组装点——下一章看 ReviewService 如何把所有组件连接为完整服务，对外暴露 API。"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

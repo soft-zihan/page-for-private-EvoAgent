@@ -1,0 +1,328 @@
+{
+  "chapters": [
+    {
+      "id": "persistence",
+      "title": "持久化",
+      "sections": [
+        {
+          "title": "背景知识：双模持久化架构",
+          "anchor": "practice-persistence-background",
+          "groupTitle": "持久化存储模块",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 10,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "EvoAgent 的持久化层有两个完全对等的实现：TaskStore（SQLite，1204行）和 PostgresTaskStore（PostgreSQL，932行）。它们实现了完全相同的公开 API，通过 create_store() 工厂函数根据 database_url 透明切换。这种设计让开发者可以零配置启动（SQLite），生产环境无缝切换到 PostgreSQL。"
+            },
+            {
+              "type": "text",
+              "text": "为什么不用 ORM（如 SQLAlchemy）？因为项目需要精确控制 SQL 语句——SQLite 和 PostgreSQL 的 JSON 操作语法不同（SQLite 用 TEXT + json.dumps，PostgreSQL 用 JSONB + ::jsonb），而且项目需要特定的并发控制策略（SQLite 用 threading.Lock，PostgreSQL 用 advisory lock）。ORM 会隐藏这些关键差异。"
+            },
+            {
+              "type": "text",
+              "text": "在深入代码之前，先理解几个数据库核心概念：\n\n**什么是 ORM？** ORM（Object-Relational Mapping，对象关系映射）是一种技术，让你用 Python 代码操作数据库，而不需要写 SQL 语句。比如 `User.objects.create(name=\"小王\")` 会自动生成 `INSERT INTO users (name) VALUES ('小王')`。ORM 的好处是写起来像 Python，坏处是隐藏了实际执行的 SQL——出了问题很难调试。项目选择直接写 SQL，让每条查询都透明可见。\n\n**什么是 JSONB？** JSONB 是 PostgreSQL 独有的二进制 JSON 存储格式。普通 JSON 存储为文本（每次查询都要重新解析），JSONB 在写入时就解析好并建立索引，查询速度极快。比如要查询「所有包含 HIGH 级别 Finding 的任务」，JSONB 可以直接索引 `findings` 字段内部的 `severity` 值。SQLite 没有 JSONB，只能把 JSON 存为普通文本。\n\n**什么是 UPSERT？** UPSERT 是 INSERT + UPDATE 的合并操作——如果记录不存在就插入，存在就更新。SQL 写法是 `INSERT ... ON CONFLICT DO UPDATE`。就像酒店入住——没有预订就登记新客人（INSERT），有预订就更新入住状态（UPDATE）。"
+            },
+            {
+              "type": "text",
+              "text": "继续理解几个并发和结构相关的概念：\n\n**什么是 Advisory Lock？** Advisory Lock（建议锁）是 PostgreSQL 提供的一种应用级锁。与普通的行锁不同，它不锁定任何数据行，而是锁定一个「数字 ID」。应用自己决定什么时候获取锁、什么时候释放。项目用它来防止多个 Worker 同时处理同一个任务——类比：公共浴室的储物柜，谁先拿到钥匙（锁）谁用，其他人等着。\n\n**什么是 Migration？** Migration（迁移）是数据库版本管理——当代码需要新增一张表或修改表结构时，通过 migration 脚本逐步更新数据库。就像软件更新——v1.0 到 v1.1 的更新脚本只执行 v1.0→v1.1 需要的变更。项目没有使用 migration 框架（如 Alembic），而是用 `CREATE TABLE IF NOT EXISTS` 和 `ALTER TABLE ADD COLUMN IF NOT EXISTS` 实现幂等的表结构初始化。\n\n**什么是外键和复合主键？** 外键（Foreign Key）是一张表中引用另一张表的字段——比如 `trace_events.task_id` 引用 `tasks.task_id`，确保每条轨迹都属于一个真实存在的任务。复合主键（Composite Primary Key）是用多个字段组合作为唯一标识——比如 `checkpoints` 表用 `(task_id, node)` 组合，因为同一个任务的不同节点各有一个 checkpoint。"
+            },
+            {
+              "type": "table",
+              "table": {
+                "headers": [
+                  "表名",
+                  "用途",
+                  "关键特性"
+                ],
+                "rows": [
+                  [
+                    "tasks",
+                    "审查任务主表",
+                    "状态机 + 租户隔离 + 取消标志"
+                  ],
+                  [
+                    "trace_events",
+                    "任务执行轨迹",
+                    "外键关联 tasks，按步骤排序"
+                  ],
+                  [
+                    "checkpoints",
+                    "节点执行快照",
+                    "复合主键(task_id, node)，UPSERT"
+                  ],
+                  [
+                    "task_payloads",
+                    "diff 原文存储",
+                    "与 tasks 1:1 分离，避免大文本影响查询"
+                  ],
+                  [
+                    "agent_messages",
+                    "Agent 协作消息",
+                    "持久化 CollaborationBus 转录"
+                  ],
+                  [
+                    "agent_memories",
+                    "分层记忆存储",
+                    "支持 scope/kind/importance/expires_at"
+                  ],
+                  [
+                    "failure_cases",
+                    "反馈案例",
+                    "误报/漏报/坏修复回流"
+                  ],
+                  [
+                    "skill_versions",
+                    "提示词版本链",
+                    "版本号自增 + active 标记"
+                  ],
+                  [
+                    "skill_artifact_versions",
+                    "声明式 Skill 版本",
+                    "SHA-256 指纹 + 租户隔离"
+                  ],
+                  [
+                    "evaluation_cases",
+                    "评测数据集",
+                    "名称不可变 + split 分区"
+                  ],
+                  [
+                    "evolution_runs",
+                    "进化评测记录",
+                    "包含完整门禁指标"
+                  ],
+                  [
+                    "deployments",
+                    "灰度发布配置",
+                    "canary/shadow 百分比 + 自动回滚"
+                  ],
+                  [
+                    "users + memberships",
+                    "用户与租户关系",
+                    "RBAC 角色绑定"
+                  ],
+                  [
+                    "audit_log",
+                    "不可变审计日志",
+                    "只追加不修改"
+                  ],
+                  [
+                    "webhook_deliveries",
+                    "Webhook 幂等去重",
+                    "delivery_id 唯一 + SHA-256 校验"
+                  ]
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "title": "并发控制策略",
+          "anchor": "practice-persistence-concurrency",
+          "groupTitle": "持久化存储模块",
+          "difficulty": "advanced",
+          "estimatedMinutes": 12,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "SQLite 模式使用 threading.Lock 实现写互斥。所有写操作（create、transition、succeed、fail 等）都在 with self._lock 块中执行。这保证了多线程环境下数据一致性，但也意味着写操作是串行的。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# ===== SQLite 模式：使用 threading.Lock 实现进程内写互斥 =====\n# TaskStore 是 SQLite 模式的持久化实现，负责所有任务相关数据的读写\n# threading.Lock 保证同一进程内多线程的写操作串行执行，避免 SQLite 并发写冲突\n# TaskStore：核心类，封装了系统的关键行为和状态\nclass TaskStore:\n    def __init__(self, path):\n        # 创建进程级互斥锁：SQLite 不支持多写者并发，必须串行化写操作\n        self._lock = threading.Lock()\n\n    def create(self, task_id, repository, pull_request, payload, tenant_id=\"default\"):\n        now = utc_now()  # 生成 UTC 时间戳，确保时间一致性\n        # with 语句同时获取锁和数据库连接，退出时自动释放\n        # 锁保证同一时刻只有一个线程在执行写操作\n        with self._lock, self._connect() as conn:\n            conn.execute(\"INSERT INTO tasks(...) VALUES (...)\", (...))\n\n    # succeed：任务成功完成时更新状态并记录轨迹\n    # 必须在锁内执行，防止并发更新导致状态不一致\n    # succeed：公开方法，实现核心业务逻辑\n    def succeed(self, task_id, report, event):\n        with self._lock, self._connect() as conn:\n            # 更新任务状态为 SUCCESS，同时写入审查报告（JSON 序列化存储）\n            conn.execute(\"UPDATE tasks SET state='SUCCESS', report_json=? ...\", ...)\n            # 在 trace_events 表中记录这次状态变化，用于事后审计和调试\n            conn.execute(\"INSERT INTO trace_events(...) VALUES (...)\", ...)\n\n# ===== PostgreSQL 模式：使用 advisory lock 实现细粒度分布式锁 =====\n# PostgresTaskStore 是生产环境的持久化实现，支持多进程/多实例部署\nclass PostgresTaskStore:\n    # save_skill_version：公开方法，实现核心业务逻辑\n    def save_skill_version(self, skill_name, prompt, score, activate=False):\n        with self._connect() as conn:\n            # pg_advisory_xact_lock：事务级建议锁，锁定 skill_name 对应的哈希值\n            # 与 threading.Lock 不同，advisory lock 可跨进程/跨机器工作\n            # 选择 skill_name 级别的锁（而非全局锁）允许不同 skill 的版本创建并行执行\n            conn.execute(\"SELECT pg_advisory_xact_lock(hashtext(%s))\", (skill_name,))\n            # 在锁保护下查询当前最大版本号，避免并发插入导致版本号重复\n            row = conn.execute(\"SELECT COALESCE(MAX(version),0) AS version ...\", ...)\n            # 版本号自增：COALESCE 处理尚无版本的情况（MAX 返回 NULL → 0）\n            version = int(row[\"version\"]) + 1\n            # 插入新版本记录，包含提示词内容、评分和父版本号（形成版本链）\n            conn.execute(\"INSERT INTO skill_versions(...) VALUES (...)\", ...)",
+                "caption": "两种并发策略：SQLite threading.Lock vs PostgreSQL advisory lock"
+              }
+            },
+            {
+              "type": "text",
+              "text": "PostgreSQL 模式使用 pg_advisory_xact_lock 实现细粒度锁。例如 save_skill_version 先获取 skill_name 级别的 advisory lock，然后查询最大版本号并插入新版本。这比全局锁更高效——不同 skill_name 的版本创建可以并行执行。"
+            }
+          ]
+        },
+        {
+          "title": "Webhook 幂等与任务去重",
+          "anchor": "practice-persistence-idempotent",
+          "groupTitle": "持久化存储模块",
+          "difficulty": "advanced",
+          "estimatedMinutes": 10,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "GitHub Webhook 可能重复投递（网络重试、手动重发）。claim_webhook() 通过 delivery_id 的唯一约束实现幂等：第一次插入成功返回 True，重复插入触发 IntegrityError 后比较 payload SHA-256，相同则返回 False（去重），不同则抛异常（冲突）。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# claim_webhook：实现 Webhook 幂等性的核心方法\n# GitHub 可能重复投递同一个 Webhook（网络重试、手动重发），此方法确保同一个事件只被处理一次\n# 设计思路：利用 delivery_id 的唯一约束实现「首次插入成功，重复插入走冲突检测」\ndef claim_webhook(self, delivery_id, tenant_id, event_type, payload_sha256):\n    # 防御性检查：delivery_id 是 GitHub 在 HTTP Header 中提供的唯一标识\n    # 如果缺失则拒绝处理，因为没有它就无法保证幂等性\n    if not delivery_id:\n        raise ValueError(\"X-GitHub-Delivery is required\")\n    # 在锁保护下执行，防止并发插入同一个 delivery_id\n    with self._lock, self._connect() as conn:\n        try:\n            # 尝试插入新的 Webhook 记录\n            # webhook_deliveries 表的 delivery_id 列有 UNIQUE 约束\n            # 首次投递 → INSERT 成功 → 返回 True，表示「认领」了这个 Webhook\n            conn.execute(\"INSERT INTO webhook_deliveries(...) VALUES (...)\",\n                        (delivery_id, tenant_id, event_type, payload_sha256, utc_now()))\n            return True  # 首次投递，成功认领\n        except sqlite3.IntegrityError:\n            # INSERT 失败 → delivery_id 已存在 → 可能是重复投递\n            # 此时不能简单忽略，需要检查 payload 是否一致\n            row = conn.execute(\n                # 查询已存在的记录的 payload 哈希值\n                \"SELECT payload_sha256 FROM webhook_deliveries WHERE delivery_id=?\",\n                (delivery_id,)\n            ).fetchone()\n            # 如果 payload 哈希不同 → 同一个 delivery_id 携带了不同内容 → 异常情况\n            # 这可能是 GitHub 的 bug 或恶意请求，必须抛出异常让上层处理\n            if row and row[\"payload_sha256\"] != payload_sha256:\n                raise ValueError(\"delivery id was already used with a different payload\")\n            # payload 完全相同 → 正常的重复投递 → 静默返回 False\n            # 上层收到 False 后跳过处理，避免同一个 PR 事件被审查两次\n            return False  # 完全相同的重复投递，静默去重",
+                "caption": "Webhook 幂等：delivery_id 唯一约束 + SHA-256 冲突检测"
+              }
+            }
+          ]
+        },
+        {
+          "title": "七张表的字段结构",
+          "anchor": "practice-persistence-schema",
+          "groupTitle": "持久化存储模块",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 12,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "项目启动时创建七张表，以下是各表的核心字段："
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "sql",
+                "content": "-- ===== tasks: 任务主表 =====\n-- 每张审查任务的核心记录，贯穿整个生命周期\nid TEXT PRIMARY KEY,          -- 任务唯一标识（UUID 格式）\nstate TEXT,                   -- 当前状态：PENDING/PLANNING/EXECUTING/REVIEWING/SUCCESS/FAILED/CANCELLED\nrepository TEXT,              -- 仓库名（如 'acme/api-service'）\npull_request INTEGER,         -- PR 编号（直接 API 调用时为 NULL）\ninput_json TEXT,              -- 输入参数（JSON 格式，包含 diff 指纹）\nreport_json TEXT,             -- 审查报告（JSON 格式，任务成功后填入）\nerror TEXT,                   -- 错误信息（任务失败时记录异常详情）\ncreated_at TEXT,              -- 创建时间（ISO 8601 格式）\nupdated_at TEXT,              -- 最后更新时间\ntenant_id TEXT,               -- 租户隔离标识（多租户支持）\ncancel_requested INTEGER      -- 取消请求标志（1=已请求取消，协作式检查点响应）\n\n-- ===== trace_events: 状态变化轨迹表 =====\n-- 记录任务每次状态迁移，用于事后审计和调试\ntask_id TEXT,                 -- 外键关联 tasks 表，确保每条轨迹属于真实任务\nstep INTEGER,                 -- 步骤序号（递增），标识迁移顺序\nstate TEXT,                   -- 迁移后的目标状态\nmessage TEXT,                 -- 迁移描述（如 'diff parsed: 1 file, 14 added lines'）\ncreated_at TEXT               -- 迁移发生时间\n\n-- ===== checkpoints: 节点级快照表 =====\n-- 支持断点续跑：节点成功后保存快照，崩溃后从最后成功节点恢复\ntask_id TEXT,                 -- 任务 ID（与 node 组成复合主键）\nnode TEXT,                    -- 节点名称（如 'planning'/'executing'/'reviewing'）\nstatus TEXT,                  -- 节点状态：completed 或 failed\nattempt INTEGER,              -- 尝试次数（含重试）\nstate_json TEXT,              -- 节点输出的状态数据（JSON 格式）\nerror TEXT,                   -- 失败时的错误信息\nupdated_at TEXT,              -- 最后更新时间\nPRIMARY KEY (task_id, node)   -- 复合主键：同一任务每个节点只有一个最新 checkpoint\n\n-- ===== failure_cases: 反馈案例表 =====\n-- 存储用户提交的误报/漏报/坏修复反馈，驱动进化引擎学习\ntask_id TEXT,                 -- 关联的任务 ID\ncategory TEXT,                -- 反馈类别：false_positive/missed_issue/bad_fix\npayload_json TEXT,            -- 反馈详情（JSON 格式，包含 finding 信息）\nresolved INTEGER,             -- 是否已解决（0=未解决，1=进化引擎已处理）\ncreated_at TEXT               -- 反馈提交时间\n\n-- ===== skill_versions: 提示词版本链表 =====\n-- 记录每次提示词进化的版本，支持回滚和审计\nskill_name TEXT,              -- 技能名称（如 'llm-review'）\nversion INTEGER,              -- 版本号（自增，由 advisory lock 保护并发安全）\nprompt TEXT,                  -- 提示词全文\nscore REAL,                   -- 评测分数（回放验证集的结果）\nactive INTEGER,               -- 是否为当前激活版本（同一 skill_name 只有一个 active=1）\nparent_version INTEGER,       -- 父版本号（形成版本链，支持追溯进化历史）\ncreated_at TEXT               -- 版本创建时间\n\n-- ===== evaluation_cases: 评测数据集表 =====\n-- 存储用于进化评测的测试案例，名称一旦创建不可修改\nname TEXT PRIMARY KEY,        -- 案例名称（主键，不可变——防止历史指纹指向新内容）\nsplit TEXT,                   -- 数据分区：validation（参与进化）或 holdout（期末考试）\ndiff TEXT,                    -- 测试用的 unified diff 原文\nexpected_json TEXT,           -- 期望发现的 Finding 列表（JSON 格式）\nsource TEXT,                  -- 数据来源（如 'github-pr'）\nactive INTEGER,               -- 是否启用\ncreated_at TEXT               -- 创建时间\n\n-- ===== evolution_runs: 进化评测记录表 =====\n-- 记录每次进化尝试的完整指标，支持审计和回滚\nskill_name TEXT,              -- 进化的技能名称\ncandidate_version INTEGER,    -- 候选版本号\nbaseline_version INTEGER,     -- 基线版本号（对比基准）\ndecision TEXT,                -- 门禁决定：activated 或 rejected\ncandidate_score REAL,         -- 候选版本评测分数\nbaseline_score REAL,          -- 基线版本评测分数\nmetrics_json TEXT,            -- 详细评测指标（JSON：precision/recall/F1/severity_accuracy 等）\ncreated_at TEXT               -- 评测运行时间",
+                "caption": "七张表的核心字段结构"
+              }
+            },
+            {
+              "type": "text",
+              "text": "任务表只保存 diff 字节数和 SHA-256，原始 diff 单独放在 task_payloads 表中。这样数据库不会长期保存每个 PR 的完整代码，但异步任务故障后也无法只靠任务表重放输入。"
+            }
+          ]
+        },
+        {
+          "title": "评测案例不可覆盖与数据库初始化边界",
+          "anchor": "practice-persistence-immutability",
+          "groupTitle": "持久化存储模块",
+          "difficulty": "advanced",
+          "estimatedMinutes": 8,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "save_evaluation_case() 遇到同名案例时会比较 split、diff、expected。完全相同则返回原记录；内容不同则报错：evaluation case names are immutable; use a new name for revised content。这样历史运行里记录的 case ID 和数据集指纹不会悄悄指向新内容。"
+            },
+            {
+              "type": "text",
+              "text": "数据库初始化边界：SQLite 和 PostgreSQL 都在启动时执行 CREATE TABLE IF NOT EXISTS。项目没有 migration 版本，也没有 schema 升级和回滚脚本。新增列、修改索引或变更约束时，不能只靠 CREATE TABLE IF NOT EXISTS。正式部署需要 Alembic 或独立迁移方案。"
+            },
+            {
+              "type": "text",
+              "text": "SQLite 并发控制：TaskStore 每次操作创建新连接，写操作使用进程内 threading.Lock。这能减少同一进程里的并发写冲突，但不能协调多个服务进程。SQLite 适合本地和测试，不适合当前实现下的多实例部署。PostgreSQL 用 JSONB 保存输入、报告和指标，提示词版本分配使用 pg_advisory_xact_lock(hashtext(skill_name)) 使版本分配串行化。"
+            }
+          ]
+        },
+        {
+          "title": "PostgresTaskStore：JSONB 与增量迁移",
+          "anchor": "practice-persistence-postgres",
+          "groupTitle": "持久化存储模块",
+          "difficulty": "advanced",
+          "estimatedMinutes": 10,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "PostgresTaskStore（932行）实现了与 TaskStore 相同的核心持久化接口。它使用 psycopg（v3）的 dict_row 工厂获取字典形式的查询结果。两个 Store 共享 55 个公共方法（如 create、transition、succeed、save_checkpoint 等），但 SQLite 版本额外包含 record_shadow_observation 和 list_release_observations 两个方法——这两个方法用于 shadow 灰度发布模式的观察记录，目前仅在 SQLite 模式下完整支持。"
+            },
+            {
+              "type": "table",
+              "table": {
+                "headers": [
+                  "特性",
+                  "SQLite (TaskStore)",
+                  "PostgreSQL (PostgresTaskStore)"
+                ],
+                "rows": [
+                  [
+                    "JSON 存储",
+                    "TEXT + json.dumps/json.loads",
+                    "JSONB 原生类型"
+                  ],
+                  [
+                    "布尔值",
+                    "INTEGER (0/1)",
+                    "BOOLEAN (TRUE/FALSE)"
+                  ],
+                  [
+                    "时间戳",
+                    "TEXT (ISO 8601)",
+                    "TIMESTAMPTZ"
+                  ],
+                  [
+                    "自增主键",
+                    "TEXT (UUID)",
+                    "BIGSERIAL"
+                  ],
+                  [
+                    "并发写控制",
+                    "threading.Lock（进程内）",
+                    "pg_advisory_xact_lock（事务级）"
+                  ],
+                  [
+                    "版本分配锁",
+                    "threading.Lock",
+                    "pg_advisory_xact_lock(hashtext(skill_name))"
+                  ],
+                  [
+                    "增量迁移",
+                    "无",
+                    "ALTER TABLE ... ADD COLUMN IF NOT EXISTS"
+                  ]
+                ]
+              }
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# ===== PostgreSQL 实现：利用 JSONB 原生类型和增量迁移 =====\n# PostgresTaskStore 与 TaskStore 实现相同的持久化接口，但利用 PostgreSQL 的高级特性\n# JSONB 是 PostgreSQL 独有的二进制 JSON 格式，写入时预解析，支持索引和高效查询\nclass PostgresTaskStore:\n    # create：创建新的审查任务\n    # 与 SQLite 版本的区别：使用 %s 占位符（psycopg 风格）和 ::jsonb 类型转换\n    def create(self, task_id, repository, pull_request, payload, tenant_id=\"default\"):\n        with self._connect() as conn:\n            conn.execute(\n                # INSERT 新任务记录，初始状态为 PENDING\n                # %s 是 psycopg 的参数占位符，::jsonb 将文本转换为 JSONB 类型\n                \"INSERT INTO tasks(id, state, repository, pull_request, \"\n                \"input_json, report_json, ...) VALUES \"\n                \"(%s, 'PENDING', %s, %s, %s::jsonb, %s::jsonb, ...)\",\n                # json.dumps 将 Python 字典序列化为 JSON 字符串，存入 JSONB 列\n                # PostgreSQL 会自动解析并建立索引，后续可直接查询 JSONB 内部字段\n                (task_id, repository, pull_request,\n                 json.dumps(payload.get(\"input\", {})),   # JSONB 存储\n                 json.dumps({}), ...)\n            )\n\n    # _init：数据库初始化与增量迁移\n    # 设计原则：使用 ALTER TABLE ... ADD COLUMN IF NOT EXISTS 实现幂等迁移\n    # 每次启动都会执行，已存在的列会被安全跳过，不会报错\n    # 这比 Alembic 等 migration 框架更轻量，但功能也更有限\n    # _init：内部辅助方法，供类内部其他方法调用\n    def _init(self):\n        # 每条语句都是「添加列，如果不存在」——重复执行完全安全\n        statements = [\n            # 为 tasks 表添加租户隔离字段（多租户支持）\n            \"ALTER TABLE tasks ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT 'default'\",\n            # 添加取消请求标志：用户可以在任务执行中请求取消\n            \"ALTER TABLE tasks ADD COLUMN IF NOT EXISTS cancel_requested BOOLEAN NOT NULL DEFAULT FALSE\",\n            # 为 skill_artifact_versions 表也添加租户隔离\n            \"ALTER TABLE skill_artifact_versions ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT 'default'\",\n            # ... 其他增量迁移\n        ]\n        # 在单个事务中执行所有迁移语句，保证原子性\n        # 如果某条语句失败，整个事务回滚，数据库结构不会处于中间状态\n        with self._connect() as conn:\n            for sql in statements:\n                conn.execute(sql)",
+                "caption": "PostgreSQL 实现：JSONB 原生类型 + 增量迁移（ALTER TABLE ADD COLUMN IF NOT EXISTS）"
+              }
+            },
+            {
+              "type": "text",
+              "text": "PostgresTaskStore 还额外支持 SQLite 没有的表：repository_grants（租户级仓库授权）、deployments（灰度发布配置，含 canary_percent/shadow_percent/max_error_rate/min_samples）、alerts（自动告警记录）。这些表在 _init() 中通过 CREATE TABLE IF NOT EXISTS 创建，与 SQLite 共享相同的表结构逻辑。"
+            }
+          ]
+        },
+        {
+          "title": "案例实战：PR #42 在数据库中的完整记录",
+          "anchor": "practice-persistence-case-study",
+          "groupTitle": "持久化存储模块",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 8,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "让我们看 PR #42 审查完成后，数据库中留下了哪些记录。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "sql",
+                "content": "-- 1. tasks 表：任务主记录\nSELECT id, state, repository, pull_request, diff_bytes, diff_sha256\nFROM tasks WHERE pull_request = 42;\n-- 结果: id='a1b2c3...', state='SUCCESS', repository='acme/api-service',\n--        pull_request=42, diff_bytes=512, diff_sha256='e3b0c44...'\n-- 注意：原始 diff 不保存在 tasks 表中\n\n-- 2. task_payloads 表：原始 diff 存储\nSELECT task_id, length(diff) as diff_length\nFROM task_payloads WHERE task_id = 'a1b2c3...';\n-- 结果: diff_length=512（原始 diff 单独存储）\n\n-- 3. trace_events 表：状态变化轨迹\nSELECT step, state, message FROM trace_events\nWHERE task_id = 'a1b2c3...' ORDER BY step;\n--   step=1, state='PLANNING',  message='diff parsed: 1 file, 14 added lines'\n--   step=2, state='EXECUTING', message='review started'\n--   step=3, state='REVIEWING', message='5 findings, risk=high'\n--   step=4, state='SUCCESS',   message='review completed'\n\n-- 4. checkpoints 表：节点级快照\nSELECT node, status, attempt FROM checkpoints\nWHERE task_id = 'a1b2c3...';\n--   node='planning',  status='completed', attempt=1\n--   node='executing', status='completed', attempt=1\n--   node='reviewing', status='completed', attempt=1\n\n-- 5. webhook_deliveries 表：幂等去重记录\nSELECT delivery_id, event_type, payload_sha256\nFROM webhook_deliveries WHERE delivery_id LIKE 'abc%';\n-- 结果: delivery_id='abc-123-...', event_type='pull_request'\n-- 如果 GitHub 重复投递同一个 Webhook，claim_webhook() 会返回 False\n\n-- 6. agent_messages 表：多 Agent 协作转录\nSELECT sender, recipient, kind FROM agent_messages\nWHERE task_id = 'a1b2c3...' ORDER BY id;\n-- 结果: 约 20-30 条消息（assignment, peer_challenge, evidence_report, ...）",
+                "caption": "PR #42 在数据库中的 6 张表里留下的记录"
+              }
+            },
+            {
+              "type": "text",
+              "text": "这个案例展示了持久化层的几个关键设计：(1) tasks 表只存 diff 指纹（diff_bytes + diff_sha256），原始 diff 在 task_payloads 表中——避免大文本影响查询性能；(2) trace_events 记录了完整的状态变化历史，支持事后审计；(3) checkpoints 使得任务中断后可以从最后一个成功节点恢复，不需要重头开始；(4) webhook_deliveries 确保同一个 Webhook 不会被处理两次。→ 这些记录的查询入口在 API 层（详见 13-服务编排与API教程）。"
+            }
+          ]
+        },
+        {
+          "title": "模块总结",
+          "anchor": "practice-persistence-summary",
+          "groupTitle": "持久化存储模块",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 5,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "持久化层的核心设计原则：(1) 接口基本统一——TaskStore 和 PostgresTaskStore 共享 55 个公共方法，SQLite 额外包含 shadow 观察记录方法；(2) 渐进增强——SQLite 零配置启动，PostgreSQL 生产增强（advisory lock、JSONB）；(3) 幂等安全——Webhook 去重、评测样本名称不可变、checkpoint UPSERT；(4) 审计完整——所有状态变更记录 trace_events，所有管理操作记录 audit_log，不可变只追加。→ 延伸阅读：TaskQueue 的队列持久化详见 10-认证与队列教程；ReviewHarness 的 checkpoint 恢复详见 07-运行时教程。"
+            },
+            {
+              "type": "text",
+              "text": "PR #42 的审查报告和 Trace 现在安全地保存在数据库中。但生产环境还需要认证保护和可靠的任务队列——下一章解决这两个问题。"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

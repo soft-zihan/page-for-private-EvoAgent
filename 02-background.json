@@ -1,0 +1,102 @@
+{
+  "chapters": [
+    {
+      "id": "background",
+      "title": "项目背景与核心概念",
+      "sections": [
+        {
+          "title": "前置知识：Pull Request 与 Unified Diff",
+          "anchor": "background-pr-diff",
+          "groupTitle": "项目背景与核心概念",
+          "difficulty": "beginner",
+          "estimatedMinutes": 8,
+          "blocks": [
+            {"type": "text", "text": "Pull Request 是代码托管平台上的变更评审单。EvoAgent 不拉取整个仓库做全量扫描，核心输入是一段 unified diff。理解这个格式是理解整个审查流程的前提。"},
+            {"type": "code", "code": {"language": "text", "content": "--- a/app.py           # 【旧文件路径】a/ 是 Git 的标准前缀，表示变更前的版本\n+++ b/app.py           # 【新文件路径】b/ 表示变更后的版本\n@@ -1 +1,2 @@          # 【Hunk 头】格式：-旧起始行,旧行数 +新起始行,新行数\n                       # 这里表示旧文件从第1行开始共1行，新文件从第1行开始共2行\n-safe_call()           # 【删除行】以 - 开头，表示这行在 PR 中被移除\n+password = \"secret\"   # 【新增行】以 + 开头，表示这行是 PR 新增的\n+eval(user_input)      # 【新增行】另一行新增代码，EvoAgent 会审查这些新增内容", "caption": "Unified Diff 格式结构"}},
+            {"type": "text", "text": "几个符号的含义：(1) --- 表示旧文件；(2) +++ 表示新文件；(3) @@ -1 +1,2 @@ 是 hunk 头，记录旧文件和新文件的起始位置；(4) - 开头是删除行；(5) + 开头是新增行；(6) 其他行是上下文。EvoAgent 只把新增行交给规则审查，这样可以把结论限定在「本次 PR 引入的问题」。"}
+          ]
+        },
+        {
+          "title": "前置知识：Webhook 与 HMAC-SHA256",
+          "anchor": "background-webhook",
+          "groupTitle": "项目背景与核心概念",
+          "difficulty": "beginner",
+          "estimatedMinutes": 8,
+          "blocks": [
+            {"type": "text", "text": "Webhook 是 GitHub 主动调用 EvoAgent 的 HTTP 地址。PR 创建、重新打开或推送新提交时，GitHub 把事件 payload 发到 POST /webhooks/github。只判断请求头来自 GitHub 不够，因为请求头可以伪造。"},
+            {"type": "text", "text": "项目用 Webhook Secret 对原始请求体计算 HMAC-SHA256：expected = 'sha256=' + HMAC_SHA256(secret, raw_body)。然后用常量时间比较 hmac.compare_digest() 对比 GitHub 发来的 X-Hub-Signature-256。常量时间比较可以减少普通字符串逐字节比较带来的时序侧信道。"},
+            {"type": "code", "code": {"language": "python", "content": "# Webhook 签名验证函数：确保请求确实来自 GitHub，而非伪造请求\n# 参数：secret=共享密钥, body=原始请求体, signature=GitHub 发来的签名头\ndef verify_signature(secret: str, body: bytes, signature: str) -> bool:\n    # 如果没有配置 secret 或签名格式不对，直接拒绝（防御性编程）\n    if not secret or not signature.startswith(\"sha256=\"):\n        return False\n    # 用共享密钥对请求体计算 HMAC-SHA256 摘要\n    # hmac.new(密钥, 消息, 哈希算法) → 生成唯一的消息认证码\n    expected = \"sha256=\" + hmac.new(\n        secret.encode(\"utf-8\"), body, hashlib.sha256  # 密钥编码为字节\n    ).hexdigest()  # 转为十六进制字符串\n    # 使用常量时间比较（防止时序侧信道攻击）\n    # 普通 == 比较在第一个不同字符处就返回，攻击者可据此逐字节猜测签名\n    return hmac.compare_digest(expected, signature)  # 时序安全比较", "caption": "Webhook 签名验证：HMAC-SHA256 + 时序安全比较"}}
+          ]
+        },
+        {
+          "title": "前置知识：同步任务与异步任务",
+          "anchor": "background-sync-async",
+          "groupTitle": "项目背景与核心概念",
+          "difficulty": "beginner",
+          "estimatedMinutes": 5,
+          "blocks": [
+            {"type": "text", "text": "同步审查：POST /v1/reviews，HTTP 请求会等到审查完成再返回报告。适合本地调试和短 diff。异步审查：POST /v1/reviews?async=true，服务先创建 PENDING 任务，然后把 payload 交给线程池或 Redis，立即返回任务 ID。调用方之后查询 GET /v1/tasks/{task_id}。"},
+            {"type": "text", "text": "GitHub Webhook 默认走异步链路，因为 Webhook 不适合一直等待 LLM 或多个 Reviewer 完成。同步和异步最终调用同一个 _run_review()，所以两者使用同一个 Harness 语义和状态流。"}
+          ]
+        },
+        {
+          "title": "前置知识：有限状态机",
+          "anchor": "background-fsm",
+          "groupTitle": "项目背景与核心概念",
+          "difficulty": "beginner",
+          "estimatedMinutes": 5,
+          "blocks": [
+            {"type": "text", "text": "有限状态机把任务限制在允许的路径上。EvoAgent 的正常状态是 PENDING → PLANNING → EXECUTING → REVIEWING → SUCCESS。运行中出错时进入 FAILED。状态不能随便跳，例如 PENDING 不能直接变成 SUCCESS。这类限制放在代码里比写在 prompt 里可靠，因为模型不能绕过状态机直接宣布任务成功。"},
+            {"type": "code", "code": {"language": "python", "content": "# 有限状态机转换表：定义每个状态可以合法迁移到哪些目标状态\n# 键=当前状态，值=允许的目标状态集合\n# 这种设计把合法转换路径硬编码在代码中，LLM 无法绕过\nALLOWED = {\n    # PENDING（刚创建）→ 只能进入规划阶段、失败或取消\n    TaskState.PENDING:   {TaskState.PLANNING, TaskState.FAILED, TaskState.CANCELLED},\n    # PLANNING（解析diff中）→ 只能进入执行阶段、失败或取消\n    TaskState.PLANNING:  {TaskState.EXECUTING, TaskState.FAILED, TaskState.CANCELLED},\n    # EXECUTING（审查中）→ 只能进入报告生成、失败或取消\n    TaskState.EXECUTING: {TaskState.REVIEWING, TaskState.FAILED, TaskState.CANCELLED},\n    # REVIEWING（生成报告中）→ 只能进入成功、失败或取消\n    TaskState.REVIEWING: {TaskState.SUCCESS, TaskState.FAILED, TaskState.CANCELLED},\n}\n# 终态（SUCCESS/FAILED/CANCELLED）不在 ALLOWED 左侧，不能继续迁移\n# 这意味着一旦任务完成/失败/取消，就不可再被改变——保证审计完整性", "caption": "有限状态机：严格的状态转换规则"}}
+          ]
+        },
+        {
+          "title": "前置知识：Precision、Recall 和 F1",
+          "anchor": "background-metrics",
+          "groupTitle": "项目背景与核心概念",
+          "difficulty": "beginner",
+          "estimatedMinutes": 8,
+          "blocks": [
+            {"type": "text", "text": "评测不能只看「模型说得像不像」。EvoAgent 使用位置级的客观指标。Precision = TP / (TP + FP)，Recall = TP / (TP + FN)，F1 = 2 * Precision * Recall / (Precision + Recall)。TP 是正确命中的问题，FP 是误报，FN 是漏报。"},
+            {"type": "text", "text": "只看 Recall 容易鼓励模型多报问题，只看 Precision 又可能让模型过于保守。F1 用来平衡两者。Validation 用来判断候选提示词是否比基线更好。Holdout 是隐藏回归集，用来检查候选有没有针对公开验证样本过拟合。项目的激活逻辑不是「validation 分数高就上线」，候选还要保证 holdout 上的受保护指标不超过允许退化值。"},
+            {"type": "table", "table": {"headers": ["门禁", "默认条件"], "rows": [
+              ["Validation F1 改善", "至少提高 0.02"],
+              ["High risk recall", "不低于 baseline"],
+              ["Clean accuracy", "不低于 baseline"],
+              ["Holdout F1", "不低于 baseline"],
+              ["Execution success", "至少 0.98"],
+              ["Safe fix rate", "至少 0.75"],
+              ["E2E security fix rate", "至少 0.60"],
+              ["Production data provenance", "source kind 必须是 public-github-pr"]
+            ]}}
+          ]
+        },
+        {
+          "title": "前置知识：SQLite、PostgreSQL 和 Redis",
+          "anchor": "background-storage",
+          "groupTitle": "项目背景与核心概念",
+          "difficulty": "beginner",
+          "estimatedMinutes": 5,
+          "blocks": [
+            {"type": "text", "text": "SQLite 是单文件数据库，适合本地运行和测试。EvoAgent 默认把数据写到 evoagent.db。PostgreSQL 适合多进程或多实例共享数据。设置 EVOAGENT_DATABASE_URL 后，服务会选择 PostgresTaskStore。Redis 在这里不是数据库主存储，而是异步任务队列适配。Worker 用 **BRPOP** 等待任务——BRPOP 是 Redis 的阻塞式列表弹出命令，Worker 用它从队列中等待并获取任务，就像顾客在窗口排队等待叫号。"},
+            {"type": "text", "text": "项目启动时创建多张数据库表：tasks（任务主表）、trace_events（执行轨迹）、failure_cases（反馈案例）、skill_versions（提示词版本）、evaluation_cases（评测数据集）、evolution_runs（进化记录）、installations（GitHub 安装）。SQLite 使用 JSON 文本字段和 threading.Lock，PostgreSQL 使用 **JSONB** 和 **advisory lock**。JSONB 是 PostgreSQL 的二进制 JSON 存储格式，查询速度比普通 JSON 文本快得多，就像把书做成电子书后检索更快。advisory lock 是 PostgreSQL 的应用级锁机制，用于协调多个进程的并发操作——就像会议室的门锁，谁先拿到钥匙谁先用。这些概念在 09-持久化教程中有详细解释。"}
+          ]
+        },
+        {
+          "title": "项目完整流程总览",
+          "anchor": "background-full-flow",
+          "groupTitle": "项目背景与核心概念",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 10,
+          "blocks": [
+            {"type": "text", "text": "理解 EvoAgent 的完整流程有助于把握各模块之间的关系。以下是从 diff 输入到报告输出的完整链路："},
+            {"type": "code", "code": {"language": "text", "content": "提交 unified diff / GitHub PR Webhook    # 【入口】用户提交代码变更或 GitHub 触发 Webhook\n↓\n验签、鉴权、租户/仓库授权、大小与格式校验  # 【安全层】HMAC 验签 + 权限检查 + 输入验证\n↓\n创建任务并进入队列（同步或异步）          # 【任务管理】生成 Task 对象，放入任务队列\n↓\n解析新增行 → Planner 分配 → Specialist 并行审查  # 【核心审查】DiffParser 提取新增行，Planner 分配给多个 Agent\n↓\nCritic / Reflection → Evidence → Verifier → Arbiter  # 【质量门禁】多轮反思 + 证据验证 + 仲裁去重\n↓\n生成 JSON / Markdown 报告，持久化 trace、checkpoint 和 Finding  # 【输出层】生成报告并保存到数据库\n↓\n可选：反馈回流、自动修复、GitHub 评论、提示词/Skill 候选评测  # 【扩展功能】反馈循环 + 自动修复 + 进化机制", "caption": "EvoAgent 完整审查流程"}},
+            {"type": "diagram", "diagram": {"language": "mermaid", "content": "graph TB\n    A[GitHub Pull Request] --> B[Webhook HMAC 验签]\n    B --> C[直接 API / Web 管理台]\n    C --> D[ReviewService]\n    D --> E[TaskStore / TaskQueue]\n    E --> F[ReviewHarness]\n    F --> G[Unified Diff Parser]\n    F --> H[MultiAgentCoordinator]\n    H --> I[Security Agent]\n    H --> J[Reliability Agent]\n    H --> K[Dynamic Skill]\n    H --> L[LLM Reviewer]\n    I & J & K & L --> M[Finding 去重与质量门禁]\n    M --> N[JSON / Markdown / GitHub Comment]\n    N --> O[人工反馈]\n    O --> P[Validation + Holdout 回放]\n    P --> Q[激活或回滚提示词]", "caption": "EvoAgent 系统架构图"}}
+,
+            {"type": "text", "text": "前置知识就绪。下一章进入架构全景，并用 PR #42 案例跟踪从 Webhook 到报告的完整流程。"}
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,189 @@
+{
+  "chapters": [
+    {
+      "id": "github-integration",
+      "title": "GitHub集成",
+      "sections": [
+        {
+          "title": "背景知识：GitHub 集成的两个角色",
+          "anchor": "practice-github-background",
+          "groupTitle": "GitHub 集成模块",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 8,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "github.py（216行）实现了两个关键角色：(1) Webhook 接收器——验证 GitHub 发来的 PR 事件；(2) GitHub API 客户端——下载 diff、回写评论、创建修复分支。两者都使用标准库 urllib，不依赖第三方 HTTP 客户端。"
+            },
+            {
+              "type": "text",
+              "text": "为什么不用 requests 库？因为项目需要零依赖启动。urllib.request 虽然 API 较底层，但完全能满足需求。GitHub API 的 REST 接口也很简单——GET 获取资源、POST 创建资源、PATCH 更新资源。"
+            },
+            {
+              "type": "text",
+              "text": "在深入代码之前，先理解几个核心概念：\n\n**什么是 HMAC？** 在 10-认证教程中已详细解释。简单回顾：HMAC 就像火漆印章——发送方和接收方共享一个密钥（secret），发送方用密钥 + 消息内容计算出签名附在请求头里；接收方用同样的密钥重新计算签名，与收到的签名比较——一致就说明消息确实来自对方且未被篡改。项目用 HMAC-SHA256 验证 GitHub Webhook 请求确实来自 GitHub。\n\n**什么是指数退避（Exponential Backoff）？** 指数退避是一种重试策略——每次失败后等待的时间成倍增加。就像你给朋友打电话没人接：第一次等 1 秒再拨，第二次等 2 秒，第三次等 4 秒，第四次等 8 秒……而不是疯狂连续拨打。这样做的好处是：(1) 给对方恢复的时间；(2) 避免对服务器造成压力。项目调用 GitHub API 失败时，等待时间按 1s → 2s → 4s → 8s 递增（加上随机抖动避免多个客户端同时重试），最大不超过 30 秒。\n\n**什么是时序攻击（Timing Attack）？** 时序攻击是通过测量程序响应时间来推断秘密信息的攻击方式。假设你用 `==` 比较两个字符串——`==` 在遇到第一个不匹配的字符时就返回 False。攻击者发送大量请求，如果响应时间稍长，说明「多匹配了一个字符」。通过反复测量，就能逐字节猜出正确的签名。项目的 hmac.compare_digest() 始终比较所有字节，无论是否匹配都花费相同时间，让攻击者无法通过时间差异获取信息。\n\n**常见 HTTP 状态码**：代码中会看到这些状态码：\n- `429 Too Many Requests`：请求太频繁，被限速了\n- `500/502/503/504`：服务器端出错（内部错误/网关错误/服务不可用/网关超时），可以重试\n- `403 + X-RateLimit-Remaining=0`：GitHub API 调用次数用完了，需要等到限额重置"
+            }
+          ]
+        },
+        {
+          "title": "Webhook 签名验证",
+          "anchor": "practice-github-webhook",
+          "groupTitle": "GitHub 集成模块",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 10,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "GitHub Webhook 使用 HMAC-SHA256 签名验证请求来源。每个 Webhook 请求的 X-Hub-Signature-256 头部包含 sha256=<签名>，服务端用相同的 secret 计算签名并比较。"
+            },
+            {
+              "type": "text",
+              "text": "GitHub Webhook 的 HMAC-SHA256 签名验证机制在 02-背景知识 中已详细讲解。GitHub 集成中的具体实现是：从请求头 X-Hub-Signature-256 提取签名，用 Webhook Secret 对请求体重新计算 HMAC，然后用 hmac.compare_digest() 做常量时间比较。唯一区别是 GitHub 使用 POST /webhooks/github 端点，签名通过 X-Hub-Signature-256 头传递。"
+            },
+            {
+              "type": "text",
+              "text": "为什么用 hmac.compare_digest 而不是 ==？因为 == 在遇到第一个不匹配字符时就返回，攻击者可以通过测量响应时间逐字节猜出签名。compare_digest 始终比较所有字节，防止时序攻击。"
+            }
+          ]
+        },
+        {
+          "title": "GitHubClient：API 调用与重试",
+          "anchor": "practice-github-client",
+          "groupTitle": "GitHub 集成模块",
+          "difficulty": "advanced",
+          "estimatedMinutes": 15,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "GitHubClient 封装了所有 GitHub API 调用。关键特性：自动重试（指数退避）、速率限制处理、原始 diff 下载。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# GitHubClient：核心类，封装了系统的关键行为和状态\nclass GitHubClient:\n    def __init__(self, token: str, timeout: int = 30, max_attempts: int = 4):\n        self.token = token\n        self.timeout = timeout\n        self.max_attempts = max_attempts\n\n    # _request：内部辅助方法，供类内部其他方法调用\n    def _request(self, method, url, payload=None, accept=\"application/vnd.github+json\", raw=False):\n        data = json.dumps(payload).encode(\"utf-8\") if payload else None\n        \n        for attempt in range(1, self.max_attempts + 1):\n            request = urllib.request.Request(\n                url, data=data,\n                headers={**self._headers(accept), \"Content-Type\": \"application/json\"},\n                method=method,\n            )\n            try:\n                with urllib.request.urlopen(request, timeout=self.timeout) as response:\n                    body = response.read()\n                    return body if raw else json.loads(body.decode(\"utf-8\"))\n            # 捕获 urllib.error.HTTPError as exc 异常，执行错误恢复逻辑\n            except urllib.error.HTTPError as exc:\n                retryable = exc.code in {429, 500, 502, 503, 504}\n                if exc.code == 403 and exc.headers.get(\"X-RateLimit-Remaining\") == \"0\":\n                    retryable = True  # 速率限制也可重试\n                \n                if not retryable or attempt >= self.max_attempts:\n                    raise RuntimeError(\"GitHub API %s %s returned HTTP %d\" % (method, url, exc.code))\n                \n                # 指数退避 + 随机抖动\n                retry_after = exc.headers.get(\"Retry-After\")\n                # 初始化集合 reset，用于去重和快速查找\n                reset = exc.headers.get(\"X-RateLimit-Reset\")\n                if retry_after:\n                    delay = float(retry_after)\n                elif reset:\n                    # 初始化集合 delay，用于去重和快速查找\n                    delay = max(0.0, float(reset) - time.time())\n                else:\n                    delay = min(2 ** (attempt - 1) + random.random(), 10)\n                time.sleep(min(delay, 30))\n\n    # fetch_diff：公开方法，实现核心业务逻辑\n    def fetch_diff(self, url: str) -> str:\n        body = self._request(\"GET\", url, accept=\"application/vnd.github.v3.diff\", raw=True)\n        return body.decode(\"utf-8\", errors=\"replace\")\n\n    # upsert_comment：公开方法，实现核心业务逻辑\n    def upsert_comment(self, api_url: str, markdown: str, marker: str) -> None:\n        \"\"\"更新或创建评论（避免重复）\"\"\"\n        comments = self._json(\"GET\", api_url + \"/comments?per_page=100\")\n        body = marker + \"\\n\" + markdown\n        for comment in comments:\n            if marker in str(comment.get(\"body\", \"\")):\n                self._json(\"PATCH\", comment[\"url\"], {\"body\": body})\n                return\n        self._json(\"POST\", api_url + \"/comments\", {\"body\": body})",
+                "caption": "GitHubClient：自动重试 + 指数退避 + 评论 upsert"
+              }
+            }
+          ]
+        },
+        {
+          "title": "GitHubAppAuthenticator：GitHub App 认证",
+          "anchor": "practice-github-app-auth",
+          "groupTitle": "GitHub 集成模块",
+          "difficulty": "advanced",
+          "estimatedMinutes": 10,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "除了个人 Token 模式，系统还支持 GitHub App 认证——适合组织级部署。GitHubAppAuthenticator 负责两件事：(1) 用 App 私钥生成 JWT（JSON Web Token）证明 App 身份；(2) 用 JWT 换取 installation token（临时访问令牌），缓存到下次过期前 2 分钟。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# GitHubAppAuthenticator：核心类，封装了系统的关键行为和状态\nclass GitHubAppAuthenticator:\n    # 设置内部状态 _cache\n    _cache = {}   # 类级别缓存：(app_id, installation_id) → {token, expires_at}\n    _lock = threading.Lock()\n\n    def __init__(self, app_id: str, private_key_path: str):\n        self.app_id = app_id\n        self.private_key_path = private_key_path\n\n    # app_jwt：公开方法，实现核心业务逻辑\n    def app_jwt(self) -> str:\n        \"\"\"用 RS256 签名生成 JWT（有效期 9 分钟，提前 60 秒生效）\"\"\"\n        with open(self.private_key_path, \"rb\") as handle:\n        # 上下文管理器控制资源\n            key = handle.read()\n        now = int(time.time())\n        return jwt.encode(\n            {\"iat\": now - 60, \"exp\": now + 540, \"iss\": self.app_id},\n            key, algorithm=\"RS256\"\n        )\n\n    # installation_token：公开方法，实现核心业务逻辑\n    def installation_token(self, installation_id: int) -> str:\n        \"\"\"用 JWT 换取 installation token（有效期约 1 小时，带缓存）\"\"\"\n        cache_key = (self.app_id, int(installation_id))\n        with self._lock:\n            cached = self._cache.get(cache_key)\n            if cached and cached[\"expires_at\"] > time.time() + 120:\n                return cached[\"token\"]  # 缓存未过期，直接返回\n\n        # 调用 GitHub API 换取 token\n        response = POST /app/installations/{id}/access_tokens\n            headers: {Authorization: Bearer <jwt>}\n        result = json.loads(response.read())\n\n        with self._lock:\n            # 设置内部状态 _cache[cache_key]\n            self._cache[cache_key] = {\"token\": result[\"token\"], \"expires_at\": expires_at}\n        return result[\"token\"]",
+                "caption": "GitHubAppAuthenticator：JWT 生成 + installation token 缓存"
+              }
+            },
+            {
+              "type": "text",
+              "text": "为什么需要两层认证？GitHub App 的认证流程是：App 私钥 → JWT（证明「我是这个 App」）→ installation token（证明「我被安装在这个组织」）。JWT 有效期 9 分钟，installation token 有效期约 1 小时。缓存避免了每次 API 调用都重新换取 token。类级别的 _cache 和 _lock 确保多线程环境下不会重复请求。"
+            }
+          ]
+        },
+        {
+          "title": "修复分支与原子提交：create_atomic_commit",
+          "anchor": "practice-github-fix-branch",
+          "groupTitle": "GitHub 集成模块",
+          "difficulty": "advanced",
+          "estimatedMinutes": 12,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "自动修复功能需要创建新分支、提交修改后的文件、甚至创建 Draft PR。GitHubClient 提供了完整的 Git 操作 API。关键设计：create_atomic_commit() 使用 Git Tree API 一次性提交多个文件——它先获取父提交的 tree，创建新 tree 包含所有修改，再创建 commit 对象并更新分支引用。这比逐个文件 commit_file() 更高效，也保证了原子性。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# create_atomic_commit()：使用 Git Tree API 一次性提交多个文件\n# create_atomic_commit：公开方法，实现核心业务逻辑\ndef create_atomic_commit(self, repository, branch, parent_sha, files, message):\n    # 1. 获取父提交的 tree SHA\n    parent = self._json(\"GET\", \n        \"https://api.github.com/repos/%s/git/commits/%s\" % (repository, parent_sha))\n    \n    # 2. 创建新 tree，包含所有修改的文件\n    tree = self._json(\"POST\",\n        \"https://api.github.com/repos/%s/git/trees\" % repository,\n        {\n            \"base_tree\": parent[\"tree\"][\"sha\"],\n            \"tree\": [\n                {\"path\": path, \"mode\": \"100644\", \"type\": \"blob\", \"content\": content}\n                for path, content in sorted(files.items())  # 排序确保确定性\n            ],\n        })\n    \n    # 3. 创建 commit 对象\n    commit = self._json(\"POST\",\n        \"https://api.github.com/repos/%s/git/commits\" % repository,\n        {\"message\": message, \"tree\": tree[\"sha\"], \"parents\": [parent_sha]})\n    \n    # 4. 更新分支引用\n    self.create_branch(repository, branch, commit[\"sha\"])\n    return commit\n\n# create_draft_pull_request()：创建 Draft PR\n# create_draft_pull_request：公开方法，实现核心业务逻辑\ndef create_draft_pull_request(self, repository, title, head, base, body):\n    return self._json(\"POST\",\n        \"https://api.github.com/repos/%s/pulls\" % repository,\n        {\"title\": title, \"head\": head, \"base\": base, \"body\": body, \"draft\": True})\n\n# ensure_repository_access()：验证 installation 有权访问目标仓库\n# ensure_repository_access：公开方法，实现核心业务逻辑\ndef ensure_repository_access(self, repository):\n    result = self.get_repository(repository)\n    if str(result.get(\"full_name\", \"\")).lower() != repository.lower():\n        raise PermissionError(\"GitHub installation is not authorized for this repository\")",
+                "caption": "修复分支创建：Git Tree API 原子提交 + Draft PR（草稿 PR，不可合并） + 权限校验"
+              }
+            },
+            {
+              "type": "text",
+              "text": "为什么用 Git Tree API 而不是 Contents API 逐个提交？(1) 原子性——多个文件要么全部提交成功，要么全部失败；(2) 效率——一次 API 调用代替 N 次；(3) 历史清洁——一个 commit 包含所有修改，而不是 N 个零散的 commit。fixer.py 的 create_fix_commits() 收集所有修复文件后调用此方法，创建 evoagent/fix-pr-* 分支。注意：系统会自动创建 Draft PR（草稿 PR），但不会自动合并，由人工决定是否接受修复。"
+            }
+          ]
+        },
+        {
+          "title": "案例：小王在 GitHub 上看到审查评论",
+          "anchor": "practice-github-case-study",
+          "groupTitle": "GitHub 集成模块",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 10,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "让我们从开发者小王的角度，看 GitHub 端发生了什么。"
+            },
+            {
+              "type": "text",
+              "text": "**上午 10:00**：小王在 acme/api-service 仓库创建了 PR #42「Add deployment script」。他点击「Create pull request」后，GitHub 向他配置的 Webhook URL 发送了一个 POST 请求。小王不知道这个请求——对他来说，只是正常创建了一个 PR。"
+            },
+            {
+              "type": "text",
+              "text": "**上午 10:01**：EvoAgent 完成审查（整个过程约 30 秒）。因为配置了 `EVOAGENT_AUTO_POST_REVIEW=true`，GitHubClient.upsert_comment() 被调用。它先检查 PR 上是否已有包含 EvoAgent 标记的评论（避免重复评论同一个 PR），然后创建新评论。"
+            },
+            {
+              "type": "text",
+              "text": "**上午 10:02**：小王收到 GitHub 通知——他的 PR #42 收到了一条评论。他打开 PR 页面，看到在 diff 下方出现了一条评论，内容如下："
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "text",
+                "content": "🤖 EvoAgent Review — Risk: HIGH  # 机器人标记 + 整体风险等级为「高」\n\nFound 5 actionable issues in 1 file:  # 在 1 个文件中发现 5 个需要处理的问题\n\n🔴 deploy.py:4 — SEC-HARDCODED-SECRET (HIGH)  # 🔴 表示高危；deploy.py 第 4 行存在硬编码密钥\n   API_KEY = \"sk-prod-a1b2c3d4e5\"  # 证据（Evidence）：代码中直接写了生产环境密钥\n   → Fix: API_KEY = os.environ[\"API_KEY\"]  # 修复建议：改用环境变量读取密钥\n\n🔴 deploy.py:10 — SEC-SUBPROCESS-SHELL (HIGH)  # 第 10 行存在 shell=True 命令注入风险\n   subprocess.run(..., shell=True)  # 证据：shell=True 让攻击者可以拼接恶意命令\n   → Fix: shell=False  # 修复建议：关闭 shell 解析，命令以列表形式传递\n\n🔴 deploy.py:11 — SEC-SQL-CONCAT (HIGH)  # 第 11 行存在 SQL 注入风险\n   cursor.execute(\"...\" + env + \"'\")  # 证据：用字符串拼接构造 SQL 语句\n   → Fix: Use parameterized query: cursor.execute(\"... WHERE env=?\", (env,))  # 修复建议：改用参数化查询\n\n🟡 deploy.py:9 — REL-DEBUG-PRINT (LOW)  # 🟡 表示低危；第 9 行有调试输出\n   print(f\"Deploying to {env}...\")  # 证据：生产代码中不应有 print 调试语句\n   → Fix: Use logging module or remove before merge  # 修复建议：用 logging 模块替代或删除\n\n🟠 deploy.py:13 — REL-EMPTY-EXCEPT (MEDIUM)  # 🟠 表示中危；第 13 行捕获了过于宽泛的异常\n   except Exception: pass  # 证据：空 except 会吞掉所有错误，难以排查问题\n   → Fix: Catch specific exceptions or add logging  # 修复建议：捕获具体异常类型或至少记录日志\n\n---\n<sub>EvoAgent PR Reviewer · [View full report](http://127.0.0.1:8080/v1/tasks/.../report)</sub>  # 底部链接指向完整报告页面",
+                "caption": "小王在 PR #42 中看到的 EvoAgent 审查评论"
+              }
+            },
+            {
+              "type": "text",
+              "text": "**上午 10:15**：小王逐条查看。他承认 API_KEY 确实是硬编码的（应该用环境变量），shell=True 确实危险。但他认为 print 是故意加的调试日志。他在管理台提交反馈标记为误报。"
+            },
+            {
+              "type": "text",
+              "text": "**上午 10:30**：小王修复了代码（API_KEY 改为环境变量、shell=True 改为 False），然后推送了新的 commit。GitHub 向 EvoAgent 发送了 `synchronize` 事件。EvoAgent 再次审查新的 diff——这次只发现 3 个问题（print、SQL 拼接、空 except），因为已修复的两行不再包含风险模式。"
+            },
+            {
+              "type": "text",
+              "text": "**评论更新（upsert）**：因为第二次审查的任务 ID 不同，upsert_comment() 会创建新评论而不是覆盖旧评论。marker 机制确保同一个任务的多次审查不会重复评论。小王在 PR 中可以看到审查历史的演进。"
+            },
+            {
+              "type": "text",
+              "text": "这个场景展示了 GitHub 集成的几个关键点：(1) Webhook 对开发者透明——他不需要知道 EvoAgent 的存在；(2) 审查评论直接出现在 PR 的 diff 上下文中，不需要切换到其他工具；(3) 每次 push 都会触发重新审查，评论随代码演进更新；(4) 开发者可以在管理台提交反馈，形成闭环。"
+            }
+          ]
+        },
+        {
+          "title": "模块总结",
+          "anchor": "practice-github-summary",
+          "groupTitle": "GitHub 集成模块",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 3,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "GitHub 集成模块的设计原则：(1) 零依赖——使用标准库 urllib，不引入 requests；(2) 安全验证——HMAC-SHA256 签名 + 时序安全比较；(3) 鲁棒重试——指数退避 + 速率限制处理；(4) 幂等操作——评论 upsert 避免重复。这个模块是系统与 GitHub 生态的桥梁，让 EvoAgent 可以接收 PR 事件并回写审查结果。→ 延伸阅读：Webhook 触发的任务创建和队列投递详见 10-认证与队列教程；审查完成后自动修复的分支创建详见 15-自动修复教程。"
+            },
+            {
+              "type": "text",
+              "text": "GitHub 集成完成，系统可以自动接收 PR 并回写评论。但用户提交的自定义 Skill 代码安全吗？下一章的 Skill 沙箱解决这个关键问题。"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

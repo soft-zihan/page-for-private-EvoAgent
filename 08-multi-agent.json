@@ -1,0 +1,462 @@
+{
+  "chapters": [
+    {
+      "id": "multi-agent",
+      "title": "多Agent协作",
+      "sections": [
+        {
+          "title": "背景知识：多Agent协作协议",
+          "anchor": "practice-agents-background",
+          "groupTitle": "多Agent协作模块",
+          "difficulty": "advanced",
+          "estimatedMinutes": 12,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "EvoAgent 的核心创新在于它的多Agent协作审查协议。与简单的「调用 LLM 一次」不同，EvoAgent 模拟了一个完整的代码审查团队：Planner 分配任务 → Specialists 并行审查 → Critic 质疑 → Reflection 反思 → Evidence 独立复核 → Verifier 验证 → Arbiter 裁决。每个角色都有明确的输入输出契约。"
+            },
+            {
+              "type": "text",
+              "text": "**为什么需要多 Agent 而不是单个 Reviewer？** 这是项目的核心架构决策。单个 LLM 调用存在三个根本问题：(1) **幻觉**——模型可能编造不存在的漏洞；(2) **过度报告**——宁可错杀不可放过，导致大量误报；(3) **注意力分散**——一次审查太多文件时，模型容易遗漏细节。多 Agent 的设计哲学是「分而治之 + 交叉验证」：Planner 把大任务拆成小任务（每个 Specialist 只看 1-2 个文件），Critic 专门挑毛病（质疑证据不足），Evidence 独立验证（不依赖 LLM，用正则或 API 检查事实），Verifier 综合判断。这就像真实公司的代码审查——不是一个人说了算，而是多人 review + CI 检查 + 安全扫描层层把关。代价是延迟增加（多轮 LLM 调用）和复杂度上升，但换来的是审查质量的大幅提升和误报率的显著降低。"
+            },
+            {
+              "type": "text",
+              "text": "为什么需要这么多角色？因为单次 LLM 调用容易产生幻觉和过度报告。通过引入独立的质疑和证据复核环节，系统可以过滤掉缺乏证据支持的 finding。每个 finding 必须通过 4 道门禁：Critic 检查证据匹配、Evidence 独立验证、Fix 评估修复可行性、Verifier 综合判断。"
+            },
+            {
+              "type": "text",
+              "text": "在深入代码之前，先理解两个核心概念：\n\n**什么是 LLM 幻觉？** LLM 幻觉（Hallucination）是指大语言模型编造看似合理但实际错误的信息。比如模型可能报告「第 42 行存在 SQL 注入」，但实际上第 42 行是注释。这是因为 LLM 基于概率生成文本，有时会「脑补」不存在的细节。多 Agent 协作的核心价值就是对抗幻觉——Critic 质疑、Evidence 独立复核、Verifier 验证，形成多重校验。\n\n**什么是线程池（ThreadPoolExecutor）？** 线程池是 Python 标准库提供的并发工具。它预先创建一组线程（Worker），把任务交给空闲线程执行。类比：银行有 5 个柜台（线程），客户（任务）排队，哪个柜台空闲就服务哪个。项目中 Specialist Agent 使用线程池并行审查——多个 Agent 同时处理不同文件，大幅提升审查速度。"
+            },
+            {
+              "type": "diagram",
+              "diagram": {
+                "language": "mermaid",
+                "content": "graph LR\n    P[PlannerAgent<br/>任务分解] --> S[Specialists<br/>并行审查]\n    S --> C[CriticAgent<br/>质疑挑战]\n    C --> R[ReflectionAgent<br/>反思指导]\n    R --> S2[Specialists<br/>修订重审]\n    S2 --> E[EvidenceAgent<br/>独立复核]\n    E --> V[VerifierAgent<br/>综合验证]\n    V --> A[ArbiterAgent<br/>最终裁决]\n    A --> Report[审查报告]",
+                "caption": "多Agent协作协议流程图"
+              }
+            }
+          ]
+        },
+        {
+          "title": "CollaborationBus：Agent 间消息总线",
+          "anchor": "practice-agents-bus",
+          "groupTitle": "多Agent协作模块",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 8,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "CollaborationBus 是 Agent 间的通信基础设施。它是一个任务作用域的消息邮箱，支持发送、接收和持久化。所有 Agent 间的消息都通过 Bus 传递，确保协作过程可追溯。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# CollaborationBus：Agent 间的通信基础设施\n# 设计模式：观察者模式——所有 Agent 通过 Bus 发送/接收消息\n# 核心特性：线程安全 + 可选持久化（消息同步写入数据库）\n# CollaborationBus：核心类，封装了系统的关键行为和状态\nclass CollaborationBus:\n    \"\"\"任务作用域的消息邮箱 + 持久化转录。\"\"\"\n    def __init__(self, task_id=\"\", store=None):\n        self.task_id = task_id  # 消息绑定到特定任务（作用域隔离）\n        self.store = store      # 可选的持久化存储（None 时只在内存中）\n        # 初始化列表 messages: List[AgentMessage]，用于收集/存储多条数据\n        self.messages: List[AgentMessage] = []  # 内存中的消息列表\n        self._lock = threading.Lock()  # 线程锁：保证多线程发送消息时的原子性\n\n    # send：公开方法，实现核心业务逻辑\n    def send(self, sender, recipient, kind, content, correlation_id=\"\"):\n        # 构造消息对象：发送者→接收者，类型+内容+关联ID\n        message = AgentMessage(sender, recipient, kind, content, correlation_id)\n        with self._lock:  # 加锁：防止并发写入导致消息丢失\n            self.messages.append(message)\n            # 如果配置了持久化存储 → 同步写入数据库\n            if self.store and self.task_id:\n                self.store.record_agent_message(self.task_id, message.to_dict())\n        return message\n\n    # inbox：公开方法，实现核心业务逻辑\n    def inbox(self, recipient, correlation_id=\"\"):\n        \"\"\"获取指定接收者的消息（支持通配符 'specialists' 和 'all'）\"\"\"\n        # 过滤条件：接收者匹配（精确/广播）+ 关联ID匹配（如有）\n        return [m.to_dict() for m in self.messages\n                if m.recipient in {recipient, \"specialists\", \"all\"}\n                and (not correlation_id or m.correlation_id == correlation_id)]",
+                "caption": "CollaborationBus：线程安全的消息邮箱 + 持久化"
+              }
+            }
+          ]
+        },
+        {
+          "title": "PlannerAgent：任务分解与分配",
+          "anchor": "practice-agents-planner",
+          "groupTitle": "多Agent协作模块",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 10,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "PlannerAgent 分析 diff 的编程语言、文件路径和风险级别，为每个 Specialist 生成定制化的审查任务。它不执行审查，只负责「谁审查什么」。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# PlannerAgent：任务分解器——分析 diff 特征，为每个 Specialist 分配审查任务\n# 设计原则：「分而治之」——把大 diff 拆成多个小任务，每个 Agent 只关注特定领域\n# PlannerAgent：核心类，封装了系统的关键行为和状态\nclass PlannerAgent:\n    # 领域→审查目标映射：告诉每个 Specialist 应该关注什么\n    DOMAIN_OBJECTIVES = {\n        \"security\": \"Trace attacker-controlled data and find exploitable defects.\",\n        \"reliability\": \"Find failure handling, observability and runtime reliability regressions.\",\n        \"correctness\": \"Find behavior and data-flow defects introduced by the change.\",\n        \"regression\": \"Identify compatibility and test gaps caused by the change.\",\n    }\n\n    # plan：公开方法，实现核心业务逻辑\n    def plan(self, parsed, specialists) -> ReviewPlan:\n        # 第 1 步：从文件扩展名推断编程语言（.py→python, .js→javascript...）\n        # 语言信息帮助 LLM Agent 选择合适的审查策略\n        extensions = {path.rsplit(\".\", 1)[-1].lower() for path in parsed.files}\n        languages = sorted({\"python\" if ext == \"py\" else ...})\n\n        # 第 2 步：检测敏感文件——路径中包含 auth/security/payment 等关键词\n        # 敏感文件会提升整体风险等级为 'high'\n        sensitive = any(token in path.lower() for path in parsed.files\n                       for token in (\"auth\", \"security\", \"payment\", ...))\n\n        # 第 3 步：为每个 specialist 创建定制化审查任务（ReviewAssignment）\n        for agent in specialists:\n            # 获取该 Agent 声明的擅长领域（如 Security Agent → security）\n            declared = getattr(agent, \"domains\", ()) or default_domains\n            # 将领域翻译为具体的审查目标描述\n            objectives = [self.DOMAIN_OBJECTIVES[d] for d in declared]\n            assignments.append(ReviewAssignment(\n                agent=agent.name, objective=\" \".join(objectives),\n                # 初始化列表 files，用于收集/存储多条数据\n                files=list(parsed.files), risk_domains=declared,\n            ))\n\n        # 返回审查计划：语言列表 + 文件列表 + 风险等级 + 任务分配\n        return ReviewPlan(\n            # 初始化列表 languages，用于收集/存储多条数据\n            languages=languages, changed_files=list(parsed.files),\n            # 风险等级：敏感文件 或 文件数>10 → high，否则 normal\n            risk_level=\"high\" if sensitive or len(parsed.files) > 10 else \"normal\",\n            assignments=assignments,\n        )",
+                "caption": "PlannerAgent.plan()：基于文件特征的任务分解"
+              }
+            },
+            {
+              "type": "text",
+              "text": "replan() 方法处理 Specialist 失败的情况。它选择与失败任务领域重叠最多的替代者，并附加「接管失败任务」的额外目标。这确保了即使某个 Agent 崩溃，审查也不会遗漏其负责的领域。"
+            }
+          ]
+        },
+        {
+          "title": "Specialist 并行执行与失败恢复",
+          "anchor": "practice-agents-specialists",
+          "groupTitle": "多Agent协作模块",
+          "difficulty": "advanced",
+          "estimatedMinutes": 15,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "_specialist_node 使用 ThreadPoolExecutor 并行执行所有 Specialist。每个 Specialist 的执行包含重试和替换逻辑：如果 Agent 失败，先重试（最多 agent_retries 次），然后尝试 replan 到替代 Agent。"
+            },
+            {
+              "type": "text",
+              "text": "**代码中的并发概念说明**：上面的代码使用了 Python 的并发编程 API：\n- **`pool.submit(函数, 参数)`**：把一个任务提交给线程池，返回一个 **Future**（期货/承诺）。Future 就像餐厅的叫号器——你下单后拿到一个号码（Future），菜做好后号码会「兑现」（结果就绪）。\n- **`as_completed(futures)`**：等待所有 Future 完成，谁先完成谁先返回。就像叫号器按完成顺序叫号，而不是按下单顺序。\n- **`future.result()`**：取出 Future 中的结果——菜做好了，取走你的菜。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# _specialist_node()：并行执行所有 Specialist Agent\n# 使用 ThreadPoolExecutor 实现并发审查——多个 Agent 同时处理不同任务\n# _specialist_node：内部辅助方法，供类内部其他方法调用\ndef _specialist_node(self, state):\n    # 初始化列表 outcomes，用于收集/存储多条数据\n    outcomes = []  # 收集每个 Specialist 的执行结果\n    # ThreadPoolExecutor：线程池并发执行\n    # max_workers 取配置值和任务数的较小值，避免创建多余线程\n    with ThreadPoolExecutor(max_workers=min(self.max_workers, len(assignments))) as pool:\n        # 为每个 (assignment, agent) 对提交一个并发任务\n        futures = {\n            pool.submit(self._run_assignment, state, assignment, agent): assignment\n            for assignment, agent in zip(assignments, agents)\n        }\n        # as_completed：按完成顺序收集结果（先完成的先返回，不用等最慢的）\n        for future in as_completed(futures):\n            outcomes.append(future.result())\n\n    # 容错检查：如果所有 assignment 都失败 → 抛出异常\n    if outcomes and all(item[\"status\"] == \"failed\" for item in outcomes):\n        raise RuntimeError(\"all review assignments failed after retry/replanning\")\n\n    # 收集所有 findings 并追踪来源（哪个 Agent 发现了哪个 finding）\n    # 初始化字典 finding_sources，用于存储键值对数据\n    finding_sources = {}  # finding_key -> [agent_name, ...] 来源列表\n    for outcome in outcomes:\n        for finding in outcome[\"findings\"]:\n            key = finding_key(finding)  # 用 path:line:rule_id 计算唯一键\n            sources.setdefault(key, []).append(outcome[\"agent\"])\n    return {\"specialist_findings\": findings, \"finding_sources\": sources}",
+                "caption": "并行 Specialist 执行 + 来源追踪"
+              }
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# _run_assignment()：单个 Specialist 的执行逻辑 + 失败恢复\n# 失败恢复策略：首次执行 → 重试 → replan 到替代 Agent → 替代 Agent 接管\n# _run_assignment：内部辅助方法，供类内部其他方法调用\ndef _run_assignment(self, state, assignment, agent):\n    # 第 1 步：首次执行（内含 agent_retries 次重试）\n    findings, attempts, error, execution = self._invoke_agent(state, agent, assignment)\n    if not error:\n        return result  # 成功 → 直接返回结果\n\n    # 第 2 步：失败后 replan——Planner 选择替代 Agent\n    # replan 选择与失败任务领域重叠最多的替代者\n    replacement = self.planner.replan(assignment, self._replacement_candidates(agent), error)\n    if replacement is None:\n        return result  # 无可用替代者 → 返回失败结果\n\n    # 第 3 步：替代 Agent 执行（带交接上下文——告诉替代者前一个 Agent 为什么失败）\n    substitute = next(a for a in candidates if a.name == replacement.agent)\n    # 通过 Bus 发送交接消息（持久化到数据库，事后可追溯）\n    self._emit(state, self.planner.name, substitute.name, \"assignment_handoff\", {\n        \"from\": agent.name, \"reason\": error[:500], \"assignment\": replacement.to_dict(),\n    })\n    # 替代 Agent 执行，附加失败原因作为额外反馈\n    findings, repl_attempts, repl_error, repl_exec = self._invoke_agent(\n        state, substitute, replacement,\n        [\"Take over after %s failed: %s\" % (agent.name, error)]\n    )\n    return {\"agent\": substitute.name, \"substituted_for\": agent.name, ...}",
+                "caption": "失败恢复：重试 → replan → 替代 Agent 接管"
+              }
+            }
+          ]
+        },
+        {
+          "title": "_run_agent_loop：AgentLoop 与 Specialist 的桥梁",
+          "anchor": "practice-agents-agent-loop",
+          "groupTitle": "多Agent协作模块",
+          "difficulty": "advanced",
+          "estimatedMinutes": 12,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "_run_agent_loop 是 MultiAgentCoordinator 中连接 AgentLoop（模型/工具循环）和 Specialist 执行的核心方法（约 65 行）。它将上下文构建、工具注册、AgentLoop 执行和结果收集串联在一起。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# _run_agent_loop()：连接 AgentLoop（ReAct 循环）和 Specialist 执行的桥梁\n# 核心流程：记忆回忆 → 上下文构建 → 工具注册 → 有界循环执行 → 结果校验\n# _run_agent_loop：内部辅助方法，供类内部其他方法调用\ndef _run_agent_loop(self, state, agent, assignment, feedback):\n    # 第 1 步：从记忆系统回忆相关经验（历史 finding、误报记录等）\n    memories = self._recall_memories(state, assignment)\n\n    # 第 2 步：用 ContextManager 构建上下文包（diff + assignment + memories）\n    # ContextManager 负责控制上下文长度不超过 token 限制\n    # 初始化字典 bundle，用于存储键值对数据\n    bundle = self.context_manager.build(state[\"diff\"], assignment.to_dict(), memories)\n\n    # 第 3 步：注册 4 个工具供 Agent 在循环中主动调用\n    tools = self._agent_tools(state, assignment)\n    #   - search_diff(query, limit): 在 diff 中搜索文本模式\n    #   - changed_line(path, line): 读取指定新增行的内容\n    #   - list_changed_files(): 列出所有变更文件路径\n    #   - recall_memory(query, limit): 回忆相关历史经验\n\n    # 第 4 步：创建 managed_step 函数——每轮迭代都重新组合上下文\n    # 这是 ContextManager 动态压缩的关键：每轮都重新计算最优上下文\n    # managed_step：公开方法，实现核心业务逻辑\n    def managed_step(loop_iteration):\n        managed = self.context_manager.compose(\n            bundle, assignment.to_dict(),\n            feedback=feedback, inbox=loop_iteration.get(\"inbox\") or [],\n            # 初始化列表 memories，用于收集/存储多条数据\n            memories=memories, observations=loop_iteration.get(\"observations\") or [],\n            tools=tools.catalog(),  # 工具目录也注入上下文\n        )\n        # 初始化字典 prepared，用于存储键值对数据\n        prepared = dict(loop_iteration)\n        prepared[\"context\"] = managed.text  # 压缩后的上下文文本\n        return getattr(agent, \"agent_step\")(prepared)  # 调用 Agent 的单步决策\n\n    # 第 5 步：执行 AgentLoop（有界 ReAct 循环，最多 max_steps 步）\n    result = self.agent_loop.run(managed_step, tools, loop_state, on_event)\n\n    # 第 6 步：校验输出——必须全部是 Finding 对象（防止 LLM 返回非预期格式）\n    findings = list(result.output or [])\n    if not all(isinstance(item, Finding) for item in findings):\n        raise TypeError(\"agent loop final output must contain Finding objects\")\n    return findings, {\"loop_steps\": result.steps, \"tool_calls\": len(result.observations), ...}",
+                "caption": "_run_agent_loop：上下文构建 → 工具注册 → AgentLoop 执行 → 结果校验"
+              }
+            },
+            {
+              "type": "text",
+              "text": "这个方法有三个关键设计：(1) **ContextManager 动态压缩**——每轮 AgentLoop 迭代都调用 context_manager.compose() 重新组合上下文，确保不超过 token 限制；(2) **工具注册**——Agent 可以主动搜索 diff、查看特定行、列出文件、回忆经验，而不是被动接收全部信息；(3) **输出校验**——循环结束后强制检查所有输出都是 Finding 对象，防止 Agent 返回非预期格式。"
+            },
+            {
+              "type": "text",
+              "text": "_invoke_agent 是 _run_agent_loop 的外层包装，负责重试逻辑。它先检查 agent 是否有 agent_step 方法——如果有，走 _run_agent_loop（多轮工具调用）；如果没有，走 agent.review()（一次性调用）。失败后重试 agent_retries 次，仍然失败则返回空结果。"
+            }
+          ]
+        },
+        {
+          "title": "Critic + Reflection + Evidence：质疑与验证链",
+          "anchor": "practice-agents-critique",
+          "groupTitle": "多Agent协作模块",
+          "difficulty": "advanced",
+          "estimatedMinutes": 15,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "CriticAgent 对每个 finding 执行 5 项检查：前 4 项（位置、证据匹配、解释长度、修复建议长度）不通过时会生成 objection 触发修订请求；第 5 项（高严重级别但来源不足）不触发 objection，而是添加到 questions 列表供后续 Reflection 参考。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# CriticAgent：质疑挑战者——对每个 finding 执行 5 项证据检查\n# 角色类比：像法庭上的「辩护律师」，专门挑毛病，质疑证据是否充分\n# CriticAgent：核心类，封装了系统的关键行为和状态\nclass CriticAgent:\n    # challenge：公开方法，实现核心业务逻辑\n    def challenge(self, finding, parsed, peer_sources=None, round_number=1):\n        # 初始化列表 objections，用于收集/存储多条数据\n        objections = []  # 收集所有不通过项（objection 触发修订请求）\n        # 构建有效位置集合（与 _parse_findings 相同的安全校验）\n        valid_locations = {(line.path, line.line) for line in parsed.added_lines}\n        # 检查 1：finding 指向的位置必须是真实的新增行\n        if (finding.path, finding.line) not in valid_locations:\n            objections.append(\"location is not an added line\")\n        # 检查 2：finding 引用的证据必须能在源行中找到\n        source_line = next((l.content for l in parsed.added_lines\n                           if l.path == finding.path and l.line == finding.line), \"\")\n        if not finding.evidence or finding.evidence.strip() not in source_line.strip():\n            objections.append(\"quoted evidence does not match the changed line\")\n        # 检查 3：解释不能太短（太短说明 LLM 没有认真分析）\n        if len(finding.explanation.strip()) < 12:\n            objections.append(\"explanation is not specific enough\")\n        # 检查 4：修复建议必须可操作（不能太笼统）\n        if len(finding.fix.strip()) < 8:\n            objections.append(\"remediation is not actionable\")\n        # 检查 5：测试建议也必须可操作\n        if len(finding.test.strip()) < 8:\n            objections.append(\"test strategy is not actionable\")\n        # 附加检查：高严重级别但只有 1 个来源 → 需要独立验证（不触发 objection）\n        if len(peer_sources or []) < 2 and finding.severity in {CRITICAL, HIGH}:\n            questions.append(\"High-impact claim needs independent verifier evidence.\")\n        # 置信度调整：有 objection → 大幅降低(-0.35)；多来源一致 → 小幅提升(+0.08)\n        adjustment = -.35 if objections else (.08 if len(peer_sources) > 1 else .03)\n        return Critique(finding_key, not objections, objections, adjustment, ...)",
+                "caption": "CriticAgent.challenge()：5 项证据检查 + 置信度调整"
+              }
+            },
+            {
+              "type": "text",
+              "text": "EvidenceAgent 独立验证 finding 的证据。它不信任 Specialist 的声明，而是自己检查新增行是否包含与 finding 一致的模式。例如，对于 SEC-EVAL 规则，它会检查行中是否真的包含 eval( 或 exec(。这种独立验证大幅减少了幻觉 finding。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# EvidenceAgent：独立证据复核者——不信任 Specialist 的声明，自己验证\n# 角色类比：像法庭上的「法医」，独立检验证据是否支持指控\n# EvidenceAgent：核心类，封装了系统的关键行为和状态\nclass EvidenceAgent:\n    # reproduce：公开方法，实现核心业务逻辑\n    def reproduce(self, finding, parsed):\n        # 找到 finding 指向的源行内容\n        line = next((item.content for item in parsed.added_lines\n                    if item.path == finding.path and item.line == finding.line), \"\")\n        # 规则签名表：每条规则有自己的独立验证逻辑（不依赖 LLM）\n        # 这些是确定性的字符串检查——如果行中确实包含危险模式，验证通过\n        signatures = {\n            \"SEC-EVAL\": (\"eval(\" in line or \"exec(\" in line),  # 确实包含 eval/exec\n            \"SEC-SUBPROCESS-SHELL\": \"shell=True\" in line.replace(\" \", \"\"),  # 去除空格后匹配\n            \"SEC-HARDCODED-SECRET\": any(t in line.lower() for t in (\"password\", \"secret\", ...)),\n            \"REL-DEBUG-PRINT\": \"print(\" in line or \"console.log(\" in line,\n        }\n        # 精确证据匹配：finding 引用的证据文本确实在源行中\n        exact_evidence = bool(line and finding.evidence\n                             and finding.evidence.strip() in line.strip())\n        # 可复现性判断：优先使用规则签名，无签名时回退到精确证据匹配\n        reproducible = signatures.get(finding.rule_id, exact_evidence)\n        return Reproduction(finding_key, reproducible, \"independent evidence check\", ...)",
+                "caption": "EvidenceAgent：独立证据复核"
+              }
+            }
+          ]
+        },
+        {
+          "title": "Verifier + Arbiter：最终门禁",
+          "anchor": "practice-agents-verifier",
+          "groupTitle": "多Agent协作模块",
+          "difficulty": "advanced",
+          "estimatedMinutes": 10,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "VerifierAgent 综合 Critic、Evidence 和 FixAgent 的判断做出最终验证决定。它计算调整后的置信度（原始 + Critic 调整），如果低于 0.55 则拒绝。ArbiterAgent 只保留通过验证的 finding，按严重级别排序，同一位置同一规则只保留最高置信度的版本。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# VerifierAgent：综合验证者——汇总 Critic/Evidence/Fix 的判断做最终决定\n# 角色类比：像法庭上的「法官」，综合所有证据做出裁决\n# VerifierAgent：核心类，封装了系统的关键行为和状态\nclass VerifierAgent:\n    # verify：公开方法，实现核心业务逻辑\n    def verify(self, finding, critique, reproduction, fix_ready):\n        # 初始化列表 reasons，用于收集/存储多条数据\n        reasons = []  # 收集拒绝理由\n        # 计算调整后的置信度 = 原始置信度 + Critic 的调整值（钳制到 [0,1]）\n        confidence = max(0.0, min(1.0, finding.confidence + critique.confidence_adjustment))\n        # 如果 Critic 不认可（有 objection）→ 记录拒绝理由\n        if not critique.accepted:\n            reasons.extend(critique.objections)\n        # 如果 Evidence 无法复现 → 记录拒绝理由\n        if not reproduction.reproducible:\n            reasons.append(\"independent evidence could not reproduce the claim\")\n        # 如果修复方案不通过安全门禁 → 记录拒绝理由\n        if not fix_ready:\n            reasons.append(\"proposed remediation failed the safety/actionability gate\")\n        # 置信度低于 0.55 → 拒绝（阈值硬编码，不可配置）\n        if confidence < .55:\n            reasons.append(\"confidence is below the verification threshold\")\n        # 没有任何拒绝理由 → 批准\n        approved = not reasons\n        return VerificationDecision(finding_key, approved, reasons, confidence)\n\n# ArbiterAgent：最终裁决者——过滤、去重、排序\n# 只保留通过 Verifier 验证的 finding，同一位置同一规则只保留最高置信度版本\n# ArbiterAgent：核心类，封装了系统的关键行为和状态\nclass ArbiterAgent:\n    # decide：公开方法，实现核心业务逻辑\n    def decide(self, findings, decisions):\n        # 初始化字典 merged，用于存储键值对数据\n        merged = {}  # (path, line, rule_id) → Finding 去重字典\n        for finding in findings:\n            decision = decisions[finding_key(finding)]\n            if not decision.approved: continue  # 跳过未通过验证的 finding\n            finding.confidence = decision.confidence  # 更新为调整后的置信度\n            identity = (finding.path, finding.line, finding.rule_id)\n            current = merged.get(identity)\n            # 同位置同规则只保留置信度最高的版本\n            if current is None or finding.confidence > current.confidence:\n                merged[identity] = finding\n        # 按严重级别排序输出：CRITICAL > HIGH > MEDIUM > LOW\n        return sorted(merged.values(), key=lambda f: (severity_order[f.severity], f.path, f.line))",
+                "caption": "Verifier + Arbiter：综合判断 + 去重排序"
+              }
+            }
+          ]
+        },
+        {
+          "title": "RuntimeNode 编排：从 Agent 到协作协议",
+          "anchor": "practice-agents-runtime-nodes",
+          "groupTitle": "多Agent协作模块",
+          "difficulty": "advanced",
+          "estimatedMinutes": 12,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "各个 Agent 角色（Planner、Critic、Evidence 等）是独立的逻辑单元。MultiAgentCoordinator 通过 AgentRuntime 的 RuntimeNode 将它们编排成有向图：planner → specialists → deliberation → evidence → verifier → arbiter。每个节点是一个方法，接收 CollaborationState 并返回状态更新。AgentRuntime 负责按顺序执行节点、管理 checkpoint 和超时。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# review_with_context()：6 个 RuntimeNode 编排完整协作协议\n# 这是 MultiAgentCoordinator 的入口方法——将 6 个 Agent 角色串联为有向图\n# review_with_context：公开方法，实现核心业务逻辑\ndef review_with_context(self, task_id, diff, parsed, repository=\"\", tenant_id=\"default\"):\n    # 初始化协作状态：包含任务信息 + 消息总线\n    state = {\n        \"task_id\": task_id, \"diff\": diff, \"parsed\": parsed,\n        \"repository\": repository, \"tenant_id\": tenant_id,\n        \"bus\": CollaborationBus(task_id, self.store),  # 消息总线用于 Agent 间通信\n    }\n    # 通过 AgentRuntime 按顺序执行 6 个节点（责任链模式）\n    # 注意：所有节点 checkpoint=False——协作状态通过 Bus 持久化而非 Runtime checkpoint\n    result = self.runtime.execute(state, [\n        # 设置内部状态 _plan_node,          checkpoint\n        RuntimeNode(\"planner\",      self._plan_node,          checkpoint=False),  # 任务分解\n        # 设置内部状态 _specialist_node,    checkpoint\n        RuntimeNode(\"specialists\",  self._specialist_node,    checkpoint=False),  # 并行审查\n        # 设置内部状态 _deliberation_node,  checkpoint\n        RuntimeNode(\"deliberation\", self._deliberation_node,  checkpoint=False),  # 质疑-修订循环\n        # 设置内部状态 _evidence_node,      checkpoint\n        RuntimeNode(\"evidence\",     self._evidence_node,      checkpoint=False),  # 独立证据复核\n        # 设置内部状态 _verify_node,        checkpoint\n        RuntimeNode(\"verifier\",     self._verify_node,        checkpoint=False),  # 综合验证\n        # 设置内部状态 _arbitrate_node,     checkpoint\n        RuntimeNode(\"arbiter\",      self._arbitrate_node,     checkpoint=False),  # 最终裁决+记忆归档\n    ], task_id=task_id)\n    return result[\"verified\"]  # 返回通过所有门禁的 finding 列表\n\n# _deliberation_node()：多轮质疑-修订循环（Critic + Reflection + Specialist 修订）\n# _deliberation_node：内部辅助方法，供类内部其他方法调用\ndef _deliberation_node(self, state):\n    findings = list(state[\"specialist_findings\"])\n    # 最多执行 collaboration_rounds 轮质疑-修订循环\n    for round_number in range(1, self.collaboration_rounds + 1):\n        # 初始化列表 revisions，用于收集/存储多条数据\n        revisions = []\n        for finding in findings:\n            # Critic 对每个 finding 执行 5 项证据检查\n            critique = self.critic.challenge(finding, state[\"parsed\"], ...)\n            # Reflection 分析 Critic 的质疑，生成修订指导\n            reflection = self.reflection_agent.reflect(critique)\n            if reflection.revision_needed:\n                revisions.append((finding, critique, reflection))\n        if not revisions or round_number >= self.collaboration_rounds:\n            break  # 没有需要修订的 finding 或达到最大轮数 → 退出循环\n        # 请求 specialist 根据反思指导修订 finding\n        for original, critique, reflection, source in revisions:\n            revised, _, error, _ = self._invoke_agent(\n                state, agent, revised_assignment, reflection.guidance)\n            # 用修订后的 finding 替换原始 finding\n        findings = [revised_by_key.get(key, item) for item in findings]\n    return {\"specialist_findings\": findings, \"critiques\": critiques}\n\n# _arbitrate_node()：最终裁决 + 记忆归档（长期学习的关键）\n# _arbitrate_node：内部辅助方法，供类内部其他方法调用\ndef _arbitrate_node(self, state):\n    # Arbiter 过滤+去重+排序，只保留通过验证的 finding\n    # 初始化列表 verified，用于收集/存储多条数据\n    verified = self.arbiter.decide(state[\"specialist_findings\"], state[\"decisions\"])\n    # 将批准的 finding 归档到记忆系统（供未来审查时回忆）\n    if self.memory_manager and state.get(\"repository\"):\n        for finding in state[\"specialist_findings\"]:\n            self.memory_manager.remember_finding(\n                tenant_id, repository, task_id, finding.to_dict(),\n                key in approved_keys, decision.reasons)  # 记录批准/拒绝原因\n        # 整合工作记忆为长期摘要（短期记忆→长期记忆沉淀）\n        archived = self.memory_manager.consolidate_task(tenant_id, repository, task_id, summary)\n    return {\"verified\": verified}",
+                "caption": "RuntimeNode 编排：6 个节点串联完整协作协议 + 记忆归档"
+              }
+            },
+            {
+              "type": "text",
+              "text": "关键设计决策：(1) 所有节点 checkpoint=False——协作状态通过 CollaborationBus 持久化而非 Runtime checkpoint，因为每个节点的输出都是增量的（新增 findings、critiques、decisions）；(2) _deliberation_node 支持多轮循环（collaboration_rounds 参数），但每轮只修订被 Critic 质疑的 finding，未受质疑的保持不变；(3) _arbitrate_node 不仅做最终裁决，还将批准的 finding 归档到 MemoryManager，并通过 consolidate_task() 将工作记忆压缩为长期摘要，释放工作记忆空间。"
+            }
+          ]
+        },
+        {
+          "title": "AgentMessage 模型与 Finding 来源追踪",
+          "anchor": "practice-agents-message-model",
+          "groupTitle": "多Agent协作模块",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 8,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "每条协作消息都有五个字段：sender（发送者角色名）、recipient（接收者角色名，支持 specialists 和 all 广播）、kind（消息类型，如 assignment、peer_challenge、evidence_report）、content（结构化内容，不是拼接的自然语言日志）、correlation_id（关联到某个 assignment 或 Finding）。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# 消息类型枚举\n# assignment          - Planner 分派任务\n# attempt_started     - Agent 开始尝试\n# specialist_evidence - Specialist 提交证据\n# agent_failure       - Agent 执行失败\n# retry_request       - 请求重试\n# assignment_handoff  - 任务交接给替代 Agent\n# peer_challenge      - Critic 质疑\n# reflection_guidance - Reflection 指导\n# revision_request    - 请求修订\n# evidence_report     - Evidence 独立复核报告\n# verification_decision - Verifier 验证决定\n# arbitration_decision  - Arbiter 最终裁决",
+                "caption": "12 种协作消息类型"
+              }
+            },
+            {
+              "type": "text",
+              "text": "每个 Finding 都用 path:line:rule_id 计算 SHA-256 前 16 个字符作为 finding_key。finding_sources 用这个 key 记录产生该 Finding 的 specialist。后续 Critic、Evidence 和 Verifier 都用同一个 key 找到对应对象。这保证了即使多个 specialist 报告同一位置的问题，也能精确追踪来源。"
+            }
+          ]
+        },
+        {
+          "title": "FixAgent 门禁与置信度调整",
+          "anchor": "practice-agents-fix-gate",
+          "groupTitle": "多Agent协作模块",
+          "difficulty": "advanced",
+          "estimatedMinutes": 8,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "FixAgent 只是门禁，不是自动修复器。它检查 Finding 的修复建议是否非空，并拒绝包含以下短语的建议：disable validation、ignore error、catch all。它只判断修复建议是否通过安全和可行动性门槛，不会修改源代码，也不会创建分支。实际的自动修复由 SafeFixer 负责。"
+            },
+            {
+              "type": "text",
+              "text": "Verifier 的置信度计算：new_confidence = clamp(finding.confidence + critique.confidence_adjustment, 0.0, 1.0)。然后逐项添加拒绝理由：(1) Critic 不接受；(2) Evidence 无法独立复现；(3) 修复建议未通过 FixAgent 门禁；(4) 置信度低于 0.55。只有拒绝理由为空时 approved 才为真。这一步把「问题看起来像真的」和「问题足够可靠可以展示给用户」区分开。"
+            },
+            {
+              "type": "text",
+              "text": "Critic 的置信度调整规则：有 objections 时调整为 -0.35；没有 objections 时，如果同一 Finding 有多个来源调整为 +0.08，否则调整为 +0.03。这不是简单投票——多个 specialist 只增加支持来源，不会自动让事实错误的 Finding 通过。"
+            }
+          ]
+        },
+        {
+          "title": "用具体 Diff 走一遍完整协作",
+          "anchor": "practice-agents-walkthrough",
+          "groupTitle": "多Agent协作模块",
+          "difficulty": "advanced",
+          "estimatedMinutes": 15,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "让我们用一个最小 Diff 走完整个协作协议："
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "text",
+                "content": "# ===== 一个最小 Diff，用于走完整个多 Agent 协作协议 =====\n# 变更内容：app.py 新增两行——eval(data) 和 print(data)\n# eval() 是安全风险（动态代码执行），print() 是可靠性问题（调试输出）\n--- a/app.py\n+++ b/app.py\n@@ -1 +1,2 @@\n-old\n+eval(data)      # 新增行 1：动态代码执行，SEC-EVAL 规则会匹配\n+print(data)     # 新增行 2：调试输出，REL-DEBUG-PRINT 规则会匹配",
+                "caption": "测试用的最小 Diff"
+              }
+            },
+            {
+              "type": "list",
+              "list": {
+                "style": "ordered",
+                "items": [
+                  {
+                    "content": "Planner 分派：A01 → security-agent（关注 eval），A02 → reliability-agent（关注 print）"
+                  },
+                  {
+                    "content": "并行初审：Security 命中 SEC-EVAL at app.py:1，Reliability 命中 REL-DEBUG-PRINT at app.py:2"
+                  },
+                  {
+                    "content": "Critic 检查：两条 Finding 路径、行号、证据、修复和测试建议都合法，各只有 1 个来源，置信度 +0.03"
+                  },
+                  {
+                    "content": "Evidence 复核：重新检查 eval( 和 print( 是否在新增行中 → reproducible=true"
+                  },
+                  {
+                    "content": "FixAgent 门禁：检查修复建议非空且不含危险短语 → 通过"
+                  },
+                  {
+                    "content": "Verifier 验证：综合 Critic(+0.03)、Evidence(reproducible)、Fix(passed)、confidence(0.93>0.55) → approved"
+                  },
+                  {
+                    "content": "Arbiter 裁决：保留两条 Finding，按 critical(SEC-EVAL) > low(REL-DEBUG-PRINT) 排序"
+                  }
+                ]
+              }
+            },
+            {
+              "type": "text",
+              "text": "如果 Critic 发现某条 Finding 引用了不在新增行中的内容，会生成 objection → Reflection 转为指导 → specialist 收到 revision request 后重新审查。如果 specialist 失败，Planner replan 选择替代 Agent 接管。所有 assignment 都失败时，外层 Harness 把任务标记为 FAILED。"
+            }
+          ]
+        },
+        {
+          "title": "案例深入：误报如何被过滤",
+          "anchor": "practice-agents-false-positive",
+          "groupTitle": "多Agent协作模块",
+          "difficulty": "advanced",
+          "estimatedMinutes": 12,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "让我们用 PR #42 的第 5 行 `DB_PASSWORD = os.environ.get(\"DB_PASSWORD\", \"\")` 来展示多 Agent 协作如何过滤误报。这行代码看起来像是在定义一个密钥变量——LLM Agent 很容易报告它为 SEC-HARDCODED-SECRET。"
+            },
+            {
+              "type": "text",
+              "text": "**Step 1 — LLM Specialist 初审**：LLM Agent 在审查 deploy.py 时看到 `DB_PASSWORD = os.environ.get(\"DB_PASSWORD\", \"\")`，认为这是一个硬编码密钥，生成 Finding："
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "json",
+                "content": "{\n    \"rule_id\": \"SEC-HARDCODED-SECRET\",  // LLM 认为这是硬编码密钥\n    \"severity\": \"high\",                  // 严重级别：高\n    \"path\": \"deploy.py\",                 // 文件路径\n    \"line\": 5,                           // 行号：第 5 行\n    \"title\": \"Hardcoded database password\",  // 标题：硬编码数据库密码\n    \"evidence\": \"DB_PASSWORD = os.environ.get(\\\"DB_PASSWORD\\\", \\\"\\\")\",  // 证据：实际代码行\n    \"explanation\": \"The variable name suggests a database password is being defined.\",  // 解释：变量名暗示定义了密码\n    \"fix\": \"Use a secrets manager instead of environment variables.\",  // 修复建议：使用密钥管理器\n    \"test\": \"Add a test verifying the password source.\",  // 测试建议：验证密码来源的测试\n    \"confidence\": 0.72  // 置信度 0.72——LLM 比较确信，但实际是误报\n}",
+                "caption": "LLM Agent 的初始 Finding——看起来合理但实际是误报"
+              }
+            },
+            {
+              "type": "text",
+              "text": "**Step 2 — Critic 质疑**：CriticAgent 对这个 Finding 执行 5 项检查。前 3 项通过（位置在新增行、证据匹配、解释足够长）。但 Critic 注意到一个关键问题：evidence 中包含 `os.environ.get`——这明显是从环境变量读取，不是硬编码。Critic 生成 objection："
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "text",
+                "content": "# ===== Critic 对 Finding 执行 5 项证据检查 =====\n# 前 5 项格式检查都通过（位置、证据、解释长度、修复建议、测试策略）\n# 但 Critic 发现 evidence 内容包含 \"os.environ.get\" — 语义矛盾\nCritic 检查结果：\n✅ 位置检查：deploy.py:5 是新增行  # 行号确实在 parsed.added_lines 中\n✅ 证据匹配：evidence 出现在代码行中  # 引用的代码片段确实存在于源行\n✅ 解释长度：>12 字符  # 解释不是敷衍了事的短句\n✅ 修复建议：>8 字符  # 修复建议具有可操作性\n✅ 测试策略：>8 字符  # 测试建议具有可操作性\n⚠️ 但 evidence 内容包含 \"os.environ.get\" — 这是从环境变量读取，\n   与 SEC-HARDCODED-SECRET 的语义矛盾  # 关键发现：证据内容与规则含义冲突\n\nobjections: [\"evidence shows environment variable access, not a hardcoded literal\"]\nconfidence_adjustment: -0.35  # 有问题 → 大幅降低置信度（从 0.72 降到 0.37）",
+                "caption": "Critic 发现证据内容与规则语义矛盾"
+              }
+            },
+            {
+              "type": "text",
+              "text": "**Step 3 — Evidence 独立复核**：EvidenceAgent 检查 deploy.py:5 的实际内容。它的签名表中有 SEC-HARDCODED-SECRET 的验证逻辑——检查行中是否包含 password、secret 等关键词，但同时检查是否包含 os.environ、getenv 等环境变量模式。结果是："
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "text",
+                "content": "# ===== EvidenceAgent 独立验证：不信任 LLM 声明，自己检查源代码 =====\n# EvidenceAgent 使用确定性规则（字符串匹配）验证 finding 的证据\n行内容: DB_PASSWORD = os.environ.get(\"DB_PASSWORD\", \"\")\n\n检查项:\n- \"password\" in line.lower() → True（变量名包含 password）  # 关键词确实存在\n- \"os.environ\" in line → True（但这是环境变量访问！）  # 关键：是读取环境变量，不是硬编码\n- 正则匹配赋值模式: VAR = \"literal_string\" → False  # 右侧是函数调用，不是字符串字面量\n\n结论: reproducible = False  # 证据无法独立复现——不是硬编码密钥\n理由: \"The line reads from os.environ, not a hardcoded string literal\"",
+                "caption": "Evidence 独立验证发现这不是硬编码密钥"
+              }
+            },
+            {
+              "type": "text",
+              "text": "**Step 4 — Verifier 最终裁决**："
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "text",
+                "content": "# ===== Verifier 综合 Critic + Evidence + FixAgent 的判断做最终决定 =====\n# 置信度计算：原始 0.72 + Critic 调整 (-0.35) = 0.37\n原始置信度: 0.72\nCritic 调整: -0.35 (有 objection)\n调整后置信度: 0.72 + (-0.35) = 0.37  # 低于阈值 0.55\n\n拒绝理由:\n1. Critic 不接受 (objection: evidence shows env var access)  # 证据内容与规则语义矛盾\n2. Evidence 无法独立复现 (reproducible = False)  # 确定性验证失败\n3. 置信度 0.37 < 阈值 0.55  # 三重拒绝理由\n\n决定: approved = False  # 综合判断：拒绝此 Finding\n→ 这个 Finding 不会出现在最终报告中  # 误报被成功过滤",
+                "caption": "Verifier 拒绝了这个误报 Finding"
+              }
+            },
+            {
+              "type": "text",
+              "text": "对比同时通过的第 4 行 `API_KEY = \"sk-prod-a1b2c3d4e5\"`：同样的 Critic 检查，但 evidence 中是真正的字符串字面量（不含 os.environ），Evidence 确认 `password`/`secret`/`key` 等关键词出现在硬编码赋值中 → reproducible=True → 置信度 0.85+0.03=0.88 > 0.55 → approved=True。两个类似的 Finding，一个通过一个被过滤，区别在于 Evidence 能否独立验证。这就是多 Agent 协作的真正价值——不是简单地让多个 Agent 报告同一个问题，而是通过独立的质疑和验证环节过滤不可靠的发现。"
+            }
+          ]
+        },
+        {
+          "title": "测试如何证明协作真的发生了",
+          "anchor": "practice-agents-tests",
+          "groupTitle": "多Agent协作模块",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 8,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "tests/test_multi_agent_collaboration.py 不只测试最终 Finding，还测试中间协议："
+            },
+            {
+              "type": "list",
+              "list": {
+                "style": "unordered",
+                "items": [
+                  {
+                    "content": "独立 specialist：验证 Security 和 Reliability 是两个不同类，eval(data) 产生 SEC-EVAL，print(data) 产生 REL-DEBUG-PRINT"
+                  },
+                  {
+                    "content": "质疑后修订：使用会根据 feedback 改变 evidence 的 RevisingSpecialist，验证 specialist 至少被调用两次，消息中出现所有协议类型，对话轮数为 2，最终 1 条 Finding 被批准"
+                  },
+                  {
+                    "content": "失败后接管：使用始终失败的 specialist，验证 agent_retries=1 时有重试、有 handoff，fallback 接管并返回 Finding"
+                  },
+                  {
+                    "content": "不安全修复被拒绝：构造建议「禁用验证」的 Finding，验证它被 FixAgent 门禁拒绝后在 Arbiter 阶段被移除"
+                  }
+                ]
+              }
+            },
+            {
+              "type": "text",
+              "text": "服务级测试还验证：ReviewService 端到端生成成功报告、报告 protocol 是 plan-challenge-revise-evidence-verify-arbitrate、任务的持久化 collaboration 消息中确实出现 arbitration_decision。"
+            }
+          ]
+        },
+        {
+          "title": "模块总结",
+          "anchor": "practice-agents-summary",
+          "groupTitle": "多Agent协作模块",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 5,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "MultiAgentCoordinator 是系统中最复杂的模块（1000 行），但它的设计遵循清晰的分层：(1) 每个 Agent 角色职责单一且可独立测试；(2) CollaborationBus 解耦了 Agent 间的通信；(3) RuntimeNode 封装使得整个协议可以通过 AgentRuntime 执行和 checkpoint；(4) 并行执行 + 失败恢复保证了鲁棒性。最终，每个 finding 都经过了 规划→审查→质疑→证据复核→验证→裁决 的完整链路，大幅降低了误报率。→ 延伸阅读：AgentRuntime 的 checkpoint 和预算机制详见 07-运行时教程；Specialist 使用的 ContextManager 和 MemoryManager 详见 11-上下文与记忆教程。"
+            }
+          ]
+        },
+        {
+          "title": "阶段回顾：核心模块链知识整理",
+          "anchor": "practice-agents-milestone",
+          "groupTitle": "多Agent协作模块",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 5,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "恭喜你完成了核心模块链的学习！让我们回顾一下从 05 到 08 建立的知识体系：\n\n**数据流主线**：unified diff → ParsedDiff（05-Diff解析）→ Finding 列表（06-审查引擎）→ ReviewReport（07-运行时）→ 多 Agent 协作优化（08-多Agent）\n\n**核心设计决策**：\n- **只审查新增行**：减少噪声，聚焦本次变更引入的问题\n- **确定性规则 + LLM 互补**：规则提供安全底线，LLM 处理语义问题\n- **多 Agent 交叉验证**：Critic 质疑 → Evidence 复核 → Verifier 裁决，对抗 LLM 幻觉\n- **运行时与审查分离**：AgentRuntime 只负责执行和 checkpoint，不知道「审查」是什么\n\n**面试关键点**：\n- 被问到「为什么不用 LangChain」→ 三个需求：checkpoint 可控、严格预算、任务取消\n- 被问到「如何降低误报」→ 四道门禁 + 多 Agent 协作\n- 被问到「系统亮点」→ 进化引擎从反馈中学习，评测系统防过拟合\n\n接下来的教程将深入基础设施层（持久化、认证、记忆），这些模块为核心流程提供支撑。"
+            },
+            {
+              "type": "text",
+              "text": "多 Agent 协作产生了 Finding 列表和 ReviewReport。这些数据需要持久化保存——下一章学习双模持久化架构（SQLite 和 PostgreSQL）。"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

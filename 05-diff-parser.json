@@ -1,0 +1,176 @@
+{
+  "chapters": [
+    {
+      "id": "diff-parser",
+      "title": "Diff 解析",
+      "sections": [
+        {
+          "title": "背景知识：Unified Diff 格式与解析策略",
+          "anchor": "practice-diff-background",
+          "groupTitle": "Diff 解析模块",
+          "difficulty": "beginner",
+          "estimatedMinutes": 8,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "EvoAgent 的所有审查都从 unified diff 开始。Unified diff 是 git diff 的默认输出格式，它只记录文件的变更部分（hunk），而不是完整文件内容。理解这个格式是理解整个审查流程的前提。"
+            },
+            {
+              "type": "text",
+              "text": "在深入代码之前，先理解两个核心概念：\n\n**什么是正则表达式？** 正则表达式（Regular Expression，简称 regex）是一种用特殊语法描述文本模式的「微型语言」。比如 `\\bshell\\s*=\\s*True\\b` 的意思是：匹配 `shell=True`、`shell = True` 等变体——`\\b` 表示单词边界（防止匹配到 `shell=TrueMode`），`\\s*` 表示零个或多个空格。正则表达式就像超级版的 Ctrl+F——不是搜索固定字符串，而是搜索符合某种模式的字符串。项目用它来快速定位 diff 中的危险代码模式。\n\n**什么是 AST（抽象语法树）？** AST（Abstract Syntax Tree，抽象语法树）是把代码解析成树形数据结构的过程。就像把句子「小明吃了苹果」拆分成语法结构：主语（小明）→ 谓语（吃了）→ 宾语（苹果）。代码 `eval(user_input)` 的 AST 是：函数调用（eval, 参数=user_input）。正则表达式只能做字符串匹配，无法理解代码结构——比如它无法区分 `eval(x)` 和注释中的 `# eval(x)`。AST 可以。但 AST 解析更复杂，项目只在自动修复模块（15-auto-fix）中使用。"
+            },
+            {
+              "type": "text",
+              "text": "为什么只解析新增行（added lines）？因为 EvoAgent 的审查哲学是「只审查引入的问题」。删除行不会引入新 bug，上下文行没有被修改。这个设计决策大幅减少了需要分析的代码量，也避免了在旧代码上产生误报。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "text",
+                "content": "--- a/app.py           # 原文件路径\n+++ b/app.py           # 新文件路径\n@@ -1,3 +1,4 @@        # hunk header: -旧起始,旧行数 +新起始,新行数\n import os             # 上下文行（空格开头）\n-old_line              # 删除行（-开头）\n+new_line              # 新增行（+开头）← 只审查这些\n another_context       # 上下文行",
+                "caption": "Unified Diff 格式结构示意"
+              }
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# diff_parser.py — 完整实现仅 52 行，是整个系统的「入口大门」\n# 核心职责：将原始 unified diff 文本解析为结构化的 ParsedDiff 对象\n# 导入 re 模块，提供必要的工具和类型定义\nimport re\n# 导入 typing 模块，提供必要的工具和类型定义\nfrom typing import List\n\n# Hunk 头正则：匹配 @@ -旧起始,旧行数 +新起始,新行数 @@ 格式\n# 捕获组 1 = 新文件起始行号（解析器只关心这个）\n# 捕获组 2 = 新文件行数（可选，解析器不使用）\n# (?:...) 是非捕获组，只分组不捕获——减少内存开销\nHUNK = re.compile(r\"^@@ -(?:\\d+)(?:,\\d+)? \\+(\\d+)(?:,(\\d+))? @@\")\n\n# 解析函数：接收原始 diff 文本，返回结构化的 ParsedDiff\n# parse_unified_diff：公开方法，实现核心业务逻辑\ndef parse_unified_diff(diff: str) -> ParsedDiff:\n    # 初始化列表 files: List[str]，用于收集/存储多条数据\n    files: List[str] = []          # 收集所有变更的文件路径（去重）\n    # 初始化列表 added: List[ChangedLine]，用于收集/存储多条数据\n    added: List[ChangedLine] = []  # 收集所有新增行（带路径+行号+内容）\n    current_path = \"\"              # 当前正在处理的文件路径\n    new_line = 0                   # 当前新文件中的行号（随解析推进）\n    in_hunk = False                # 是否处于 hunk 内部（状态机核心标志）\n\n    # 逐行遍历 diff 文本——状态机的每一次转换都由行前缀触发\n    for raw in diff.splitlines():\n        if raw.startswith(\"+++ \"):              # 新文件声明行\n            current_path = raw[4:].strip()      # 提取文件路径（去掉 '+++ ' 前缀）\n            if current_path.startswith(\"b/\"):\n                current_path = current_path[2:]  # 去掉 git 的 b/ 前缀，统一格式\n            # /dev/null 表示新创建的文件，需要记录但不重复添加\n            if current_path != \"/dev/null\" and current_path not in files:\n                files.append(current_path)\n            in_hunk = False  # 遇到新文件头，退出当前 hunk 状态\n            continue\n        match = HUNK.match(raw)                 # 尝试匹配 hunk 头\n        if match:\n            new_line = int(match.group(1))       # 从捕获组 1 获取新文件起始行号\n            in_hunk = True                       # 进入 hunk 内部状态\n            continue\n        if not in_hunk:                          # 不在 hunk 内的行直接跳过\n            continue\n        # 核心逻辑：区分新增行(+)、删除行(-)和上下文行(空格)\n        if raw.startswith(\"+\") and not raw.startswith(\"+++\"):\n            # 新增行：去掉 '+' 前缀，记录路径+行号+内容\n            added.append(ChangedLine(current_path or \"unknown\", new_line, raw[1:]))\n            new_line += 1                       # 新增行占一个新文件行号\n        elif raw.startswith(\"-\") and not raw.startswith(\"---\"):\n            continue                            # 删除行不推进新文件行号（旧文件行号我们不关心）\n        elif raw.startswith(\"\\\\ No newline\"):\n            continue                            # 忽略 \"No newline at end of file\" 标记\n        else:\n            new_line += 1                       # 上下文行（空格开头）也要推进新文件行号\n\n    return ParsedDiff(files=files, added_lines=added)  # 返回结构化结果",
+                "caption": "diff_parser.py 完整实现：逐行状态机解析"
+              }
+            }
+          ]
+        },
+        {
+          "title": "解析器状态机与边界情况",
+          "anchor": "practice-diff-state-machine",
+          "groupTitle": "Diff 解析模块",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 10,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "解析器本质上是一个有限状态机，有 3 个状态：文件外（寻找 +++ 头）、hunk 外（寻找 @@ 行）、hunk 内（处理 +/-/空格行）。每次状态转换都由特定的行前缀触发。"
+            },
+            {
+              "type": "diagram",
+              "diagram": {
+                "language": "mermaid",
+                "content": "stateDiagram-v2\n    [*] --> 文件外\n    文件外 --> 文件外 : 非 +++ 行\n    文件外 --> Hunk外 : +++ 行（记录路径）\n    Hunk外 --> Hunk内 : @@ 行（记录新起始行号）\n    Hunk内 --> Hunk内 : +行（收集新增行）\n    Hunk内 --> Hunk内 : -行（跳过，不推进行号）\n    Hunk内 --> Hunk内 : 空格行（上下文，推进行号）\n    Hunk内 --> Hunk外 : 新 +++ 或 新 @@\n    Hunk内 --> 文件外 : diff 结束",
+                "caption": "Diff 解析器的有限状态机"
+              }
+            },
+            {
+              "type": "text",
+              "text": "几个关键的边界处理值得注意：(1) hunk 内以 + 开头的行是新增行，而 +++ 开头的行会触发 in_hunk = False 回到文件外状态。代码中 `raw.startswith(\"+\") and not raw.startswith(\"+++\")` 确保了这一点——diff 内容中即使出现以 +++ 开头的代码行，在 hunk 内也会被当作文件头处理。(2) /dev/null 路径表示新创建的文件，需要被记录但不应该被跳过。(3) 行号追踪：删除行不推进 new_line，新增行和上下文行都推进。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# 关键边界情况处理\n# 1. 新建文件：--- /dev/null → +++ b/new_file.py\n# 2. 删除文件：--- a/old_file.py → +++ /dev/null（不收集 added_lines）\n# 3. 行号追踪的精确性：\n#   @@ -10,3 +12,4 @@ 表示旧文件从第10行开始3行，新文件从第12行开始4行\n#   解析器只关心 +12（新文件起始行号），忽略旧文件信息\n\n# 输出数据结构\n@dataclass\n# ParsedDiff：数据类，自动初始化字段并生成构造函数\nclass ParsedDiff:\n    files: List[str]           # 所有变更文件路径（去重）\n    added_lines: List[ChangedLine]  # 所有新增行（带路径和行号）\n\n@dataclass\n# ChangedLine：数据类，自动初始化字段并生成构造函数\nclass ChangedLine:\n    path: str    # 文件路径（已去掉 b/ 前缀）\n    line: int    # 新文件中的行号\n    content: str # 行内容（已去掉 + 前缀）",
+                "caption": "解析输出结构与边界情况处理"
+              }
+            }
+          ]
+        },
+        {
+          "title": "Hunk 行号计算与跳过文件类型",
+          "anchor": "practice-diff-hunk-details",
+          "groupTitle": "Diff 解析模块",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 10,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "Hunk 正则表达式的两个捕获组：第一个捕获组是新文件起始行号（\\+(\\d+)），第二个捕获组是新文件行数（可选）。解析器只关心新文件行号，旧文件信息被忽略。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "HUNK = re.compile(\n    r\"^@@ -(?:\\d+)(?:,\\d+)? \\+(\\d+)(?:,(\\d+))? @@\"\n)\n# 循环规则：\n# \"+\" 新增行       -> 记录当前新行号，再加 1\n# \"-\" 删除行       -> 不增加新行号\n# \"\\ No newline\" -> 不处理\n# 其他上下文行     -> 新行号加 1",
+                "caption": "Hunk 正则与行号推进规则"
+              }
+            },
+            {
+              "type": "text",
+              "text": "本地规则会跳过 .lock、.min.js、.map 文件——这些不是人类编写的代码。但它不会统一跳过 tests/ 目录，只有 code-quality Skill 对 tests/ 做了排除。"
+            },
+            {
+              "type": "text",
+              "text": "为什么只接受新增行位置？(1) 行号能对应 GitHub 新文件视图；(2) 模型不能把仓库旧问题当成本次 PR 引入的问题。代价是跨行、删除行为变化和上下文组合问题可能漏掉——比如删除一个权限判断通常没有新增危险行，当前系统很难发现。"
+            }
+          ]
+        },
+        {
+          "title": "案例实战：解析 PR #42 的 diff",
+          "anchor": "practice-diff-case-study",
+          "groupTitle": "Diff 解析模块",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 8,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "让我们用 PR #42 的 deploy.py diff 来走一遍解析器的完整流程。这个 diff 在 03-架构教程中已介绍，包含 5 个安全问题。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "text",
+                "content": "# ── 解析器逐行处理 PR #42 的 diff（状态机演示）──\n\n--- a/deploy.py          → 状态：文件外（忽略 --- 行，它只是旧文件声明）\n+++ b/deploy.py          → 状态：文件外→记录路径 current_path=\"deploy.py\"（提取新文件路径）\n@@ -1,3 +1,15 @@       → 状态：hunk外→hunk内，new_line=1（从 hunk 头提取新文件起始行号）\n import os               → 上下文行（空格开头）：不收集，new_line 推进到 2\n+import subprocess        → 新增行（+开头）：added.append(\"deploy.py\", 2, \"import subprocess\")\n+                         → 新增行：added.append(\"deploy.py\", 3, \"\")（空行也是新增）\n+API_KEY = \"sk-prod-...\" → 新增行：added.append(\"deploy.py\", 4, 'API_KEY = \"sk-prod-...\"')\n+DB_PASSWORD = ...        → 新增行：added.append(\"deploy.py\", 5, ...)\n...（共 14 行新增，每行都触发 added.append）\n\n# ── 最终输出：parse_unified_diff() 返回的 ParsedDiff 对象 ──\nParsedDiff(\n  files=[\"deploy.py\"],                         # 变更文件列表（去重后只有 1 个文件）\n  added_lines=[                                # 所有新增行，共 14 个 ChangedLine 对象\n    ChangedLine(\"deploy.py\", 2, \"import subprocess\"),           # 第2行：导入 subprocess\n    ChangedLine(\"deploy.py\", 4, 'API_KEY = \"sk-prod-a1b2c3d4e5\"'),  # 第4行：硬编码密钥（SEC-HARDCODED-SECRET）\n    ChangedLine(\"deploy.py\", 5, 'DB_PASSWORD = os.environ.get(\"DB_PASSWORD\", \"\")'),  # 第5行：环境变量读取（安全，会被过滤为误报）\n    ChangedLine(\"deploy.py\", 9, 'print(f\"Deploying to {env} with key {API_KEY}\")'),  # 第9行：打印密钥（REL-DEBUG-PRINT）\n    ChangedLine(\"deploy.py\", 10, 'subprocess.run(f\"kubectl apply -f {config}\", shell=True)'),  # 第10行：命令注入（SEC-SUBPROCESS-SHELL）\n    ChangedLine(\"deploy.py\", 11, \"cursor.execute(\\\"SELECT ...\\\" + env + \\\"'\\\")\"),  # 第11行：SQL 注入（SEC-SQL-CONCAT）\n    ChangedLine(\"deploy.py\", 13, \"except Exception:\"),          # 第13行：宽泛异常捕获\n    ChangedLine(\"deploy.py\", 14, \"pass\"),                        # 第14行：静默吞异常（REL-EMPTY-EXCEPT）\n    ...  # 共 14 个 ChangedLine（含空行、上下文行等）\n  ]\n)",
+                "caption": "PR #42 的 diff 经过 parse_unified_diff() 后的结构化输出"
+              }
+            },
+            {
+              "type": "text",
+              "text": "注意几个关键细节：(1) 第 1 行 `import os` 是上下文行（空格开头），不会被收集到 added_lines 中——它不是本次 PR 引入的；(2) 第 3 行空行被收集为 ChangedLine(\"deploy.py\", 3, \"\")——空行也是新增行，审查器会跳过它（因为没有匹配的安全模式）；(3) 行号从 1 开始递增，跳过了上下文行和删除行。这 14 个 ChangedLine 就是下游所有审查器的输入——Security Agent、Reliability Agent、LLM Agent 都在这 14 行中寻找问题模式。"
+            },
+            {
+              "type": "text",
+              "text": "→ 下一步：这 14 个 ChangedLine 被传递给 Reviewer（详见「审查引擎」教程），LocalRuleReviewer 用正则在其中匹配安全问题。"
+            }
+          ]
+        },
+        {
+          "title": "正则审查的边界与局限",
+          "anchor": "practice-diff-regex-limits",
+          "groupTitle": "Diff 解析模块",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 8,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "正则不理解 AST、字符串字面量、注释、作用域和数据流。例如这一行也会命中 SEC-EVAL：example = \"eval(user_input)\"。因为正则看到的是文本，不知道 eval 在字符串里。反过来，跨行 subprocess.run() 或封装后的危险函数可能漏报。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# 误报场景：\nexample = \"eval(user_input)\"     # 字符串内的 eval，不是真实调用\n# eval(user_input)               # 注释中的 eval\n\n# 漏报场景：\nfunc = getattr(builtins, \"eval\")  # 间接调用\nresult = func(user_input)         # 跨行，正则无法追踪\n\n# 所以本地规则适合做高确定性的快速筛查，\n# 不适合替代完整 SAST（静态应用安全测试）\n# SAST 在不运行代码的情况下分析安全漏洞，\n# 专业工具（如 SonarQube）使用 AST + 数据流分析，\n# 能发现跨函数、跨文件的深层漏洞。",
+                "caption": "正则审查的误报与漏报场景"
+              }
+            },
+            {
+              "type": "text",
+              "text": "解析器不保留删除行、旧文件行号、完整上下文、rename 元数据或二进制内容。这些被丢弃的信息意味着：当前系统无法检测「删除了一个安全检查」这类问题。如果需要更完整的分析，应该引入 AST 解析或全仓索引。"
+            }
+          ]
+        },
+        {
+          "title": "模块总结",
+          "anchor": "practice-diff-summary",
+          "groupTitle": "Diff 解析模块",
+          "difficulty": "beginner",
+          "estimatedMinutes": 3,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "Diff 解析器虽然只有 52 行代码，但它是整个系统的入口。所有审查器（规则审查、LLM 审查、Skill 审查）都依赖 ParsedDiff 提供的结构化数据。关键设计决策：(1) 只收集新增行，减少分析范围；(2) 状态机解析，无第三方依赖；(3) 路径去 b/ 前缀，统一格式。下游模块通过 parsed.added_lines 遍历所有变更，通过 parsed.files 获取文件列表。"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

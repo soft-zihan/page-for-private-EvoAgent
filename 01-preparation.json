@@ -1,0 +1,197 @@
+{
+  "chapters": [
+    {
+      "id": "preparation",
+      "title": "前置准备",
+      "sections": [
+        {
+          "title": "环境搭建与依赖理解",
+          "anchor": "prep-environment",
+          "groupTitle": "前置准备",
+          "difficulty": "beginner",
+          "estimatedMinutes": 10,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "在深入代码之前，你需要理解 EvoAgent 的依赖策略。项目刻意保持最小依赖：核心运行只需要 Python 3.11 标准库，生产模式额外需要 psycopg（PostgreSQL）和 redis。这种设计让开发者可以零配置启动项目（SQLite + 内存队列），也意味着你阅读代码时不会遇到框架魔法。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "text",
+                "content": "# requirements.txt — 项目完整的生产依赖列表，仅 5 个包\n# 依赖越少意味着：版本冲突风险低、部署镜像小、代码行为透明\n\n# ── 数据库驱动 ──\npsycopg[binary]>=3.1,<4      # PostgreSQL 驱动（生产模式），[binary] 预编译 C 扩展加速序列化\n                               # 开发模式使用 SQLite 无需此依赖\n\n# ── 消息队列 ──\nredis>=5,<7                   # Redis Streams 队列（生产模式），用于异步任务消费和 Worker 租约\n                               # 开发模式使用进程内内存队列无需此依赖\n\n# ── 认证签名 ──\nPyJWT[crypto]>=2.8,<3         # GitHub App JWT 签名，[crypto] 引入 cryptography 库支持 RS256 算法\n                               # 用于向 GitHub API 证明 App 身份，获取临时安装令牌\n\n# ── 可观测性 ──\nopentelemetry-sdk>=1.24,<2    # OpenTelemetry SDK，提供 Trace/Span 创建和上下文传播能力\nopentelemetry-exporter-otlp-proto-http>=1.24,<2  # OTLP HTTP 导出器，将 Trace 数据发送到收集器（如 Jaeger）",
+                "caption": "项目完整的生产依赖列表"
+              }
+            },
+            {
+              "type": "text",
+              "text": "为什么只有 5 个依赖？因为项目有意避免使用 Flask/FastAPI 等 Web 框架——HTTP 层直接使用标准库 http.server。LLM 调用也使用 urllib.request 而非 openai SDK。这样做的好处是：(1) 无版本冲突风险，(2) 代码行为完全透明，(3) 部署镜像极小。"
+            },
+            {
+              "type": "list",
+              "list": {
+                "style": "ordered",
+                "items": [
+                  {
+                    "content": "安装 Python 3.11+：python --version 确认版本"
+                  },
+                  {
+                    "content": "安装依赖：pip install -r requirements.txt"
+                  },
+                  {
+                    "content": "（可选）配置 .env 文件：复制 .env.example 并填入 LLM API Key"
+                  },
+                  {
+                    "content": "启动服务：python -m evoagent"
+                  },
+                  {
+                    "content": "打开浏览器：http://127.0.0.1:8080/"
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "title": "配置系统：环境变量驱动",
+          "anchor": "prep-config",
+          "groupTitle": "前置准备",
+          "difficulty": "beginner",
+          "estimatedMinutes": 8,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "EvoAgent 的所有配置都通过环境变量注入，遵循 **12-Factor App** 原则。12-Factor App 是一套现代 Web 应用的最佳实践，核心思想之一是让应用配置从环境变量读取，而不是硬编码在代码中——就像餐厅的菜单价格可以根据市场调整，而不是印死在墙上。\n\nconfig.py 中的 Settings 是一个 **frozen dataclass**。dataclass 是 Python 的装饰器，自动生成构造函数等样板代码；frozen=True 使对象创建后不可修改，就像冻结的冰块不能再改变形状。这种设计避免了配置热更新带来的**竞态条件**——竞态条件是指多个操作同时执行时，由于执行顺序不确定导致结果不一致的问题，就像两个人同时编辑同一个文档，最后保存的内容可能覆盖对方的修改。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "@dataclass(frozen=True)\n# Settings：数据类，自动初始化字段并生成构造函数\nclass Settings:\n    host: str                          # 监听地址，默认 127.0.0.1\n    port: int                          # 监听端口，默认 8080\n    db_path: str                       # SQLite 路径（开发模式）\n    database_url: str                  # PostgreSQL URL（生产模式）\n    redis_url: str                     # Redis URL（生产队列）\n    max_diff_bytes: int                # diff 大小上限，默认 1MB\n    max_steps: int                     # 运行时最大步数\n    timeout_seconds: int               # 任务超时秒数\n    llm_provider: str                  # LLM 提供商：local/deepseek/custom...\n    auth_required: bool                # 是否启用认证\n    auth_secret: str                   # JWT 签名密钥（≥32字节）\n    # ... 共 60+ 配置项",
+                "caption": "Settings dataclass 核心字段（frozen=True 保证不可变）"
+              }
+            },
+            {
+              "type": "text",
+              "text": "dotenv 加载逻辑值得注意：项目自定义了 load_dotenv() 函数而非使用 python-dotenv 库。它只设置 os.environ.setdefault()——即系统环境变量永远优先于 .env 文件。这保证了 Docker 环境中 K8s ConfigMap 注入的值不会被本地 .env 覆盖。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# 自定义 dotenv 加载函数：不依赖 python-dotenv 第三方库，纯手工实现\n# 核心设计原则：系统环境变量永远优先于 .env 文件中的值\ndef load_dotenv(paths=None):\n    \"\"\"系统环境变量优先。.env 只是开发便利。\"\"\"\n    # candidates 是按优先级排列的 .env 文件路径列表（项目根目录 > evoagent/ 子目录）\n    for path in candidates:\n        # 逐行读取 .env 文件内容\n        for raw_line in lines:\n            # 跳过注释行（# 开头）和空行，这些不是有效配置\n            # 去除行尾换行符和空白字符\n            # 处理 'export KEY=VALUE' 格式（bash 风格导出语句）\n            if line.startswith(\"export \"):\n                line = line[7:].lstrip()  # 去掉 'export ' 前缀，只保留 KEY=VALUE\n            # 按第一个 '=' 分割为键和值（值中可能包含 '=' 字符）\n            key, value = line.split(\"=\", 1)\n            # 去除引号包裹（如 \"secret\" → secret）\n            # setdefault：只在 key 尚未存在于 os.environ 时才设置\n            # 这保证了 Docker/K8s 注入的系统环境变量不会被 .env 文件覆盖\n            os.environ.setdefault(key, value)",
+                "caption": "自定义 dotenv 加载器：系统环境变量优先"
+              }
+            },
+            {
+              "type": "text",
+              "text": "resolved_llm() 方法将 provider 名称解析为统一的 OpenAI 兼容配置。无论用户选择 deepseek、openrouter 还是自定义端点，最终都归一化为 {base_url, api_key, model, headers} 四元组。这样 Reviewer 只需要知道如何调用 /chat/completions，不需要关心具体提供商。"
+            }
+          ]
+        },
+        {
+          "title": "核心概念：Harness Engineering 与自进化",
+          "anchor": "prep-key-concepts",
+          "groupTitle": "前置准备",
+          "difficulty": "beginner",
+          "estimatedMinutes": 10,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "Harness Engineering 是理解本项目的关键概念。Harness 本意有安全带、约束装置的含义。如果说 Prompt Engineering 是写好指令，Context Engineering 是管理信息，Harness Engineering 就是设计执行系统。工程师的角色不再只是直接写代码，而是设计 Agent 的运行环境、工具权限、反馈机制、失败恢复和验证流程。"
+            },
+            {
+              "type": "text",
+              "text": "自进化 Agent 是指能够从执行结果中提取经验，并把这些经验持久化为可复用资产的 Agent。下一次遇到相似任务时，它使用更新后的 Prompt、Memory、Skill 或 Policy。这里的「进化」是工程意义上的持续改进，并不等于 Agent 可以任意重写自己的代码或模型参数。"
+            },
+            {
+              "type": "table",
+              "table": {
+                "headers": [
+                  "概念",
+                  "当前实现",
+                  "用途"
+                ],
+                "rows": [
+                  [
+                    "短期记忆 (Working Memory)",
+                    "Working Memory",
+                    "保存当前任务的工具调用、Observation、执行异常和 Loop 中间状态"
+                  ],
+                  [
+                    "长期情景记忆 (Episodic Memory)",
+                    "Episodic Memory",
+                    "保存历史 Finding、通过或拒绝结果、裁决原因和任务摘要"
+                  ],
+                  [
+                    "长期语义记忆 (Semantic Memory)",
+                    "Semantic Memory",
+                    "保存误报、漏报、坏修复及人工反馈，供后续 PR 审查召回"
+                  ],
+                  [
+                    "长期程序记忆 (Procedural Memory)",
+                    "数据结构已支持",
+                    "目前还未完整接入主链路"
+                  ]
+                ]
+              }
+            },
+            {
+              "type": "text",
+              "text": "短期记忆有 TTL，任务结束后会先把有效信息压缩为 task_summary 写入 Episodic Memory，再清理当前任务的 Working Memory。这实际就是一次「短期记忆向长期记忆沉淀」的过程。长期记忆会持久化到 SQLite 或 PostgreSQL，并按照 tenant_id + repository 隔离。"
+            },
+            {
+              "type": "text",
+              "text": "Reviewer、Agent、Skill 和 Harness 在项目里分工不同：Reviewer 是最小审查接口（接收 diff，返回 Finding）；Agent 是带职责名称的 Reviewer（如 Security Agent 只返回安全规则）；Skill 是可动态注册的审查能力；Harness 是任务运行外壳，负责状态、预算、轨迹、报告和失败落库。简单理解：Reviewer/Agent/Skill 负责「发现什么问题」，Harness 负责「这一轮审查怎么安全、完整地跑完」，ReviewService 负责「把数据库、队列、GitHub、Harness 和评测引擎组装起来」。"
+            }
+          ]
+        },
+        {
+          "title": "核心数据模型",
+          "anchor": "prep-models",
+          "groupTitle": "前置准备",
+          "difficulty": "beginner",
+          "estimatedMinutes": 8,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "models.py 定义了贯穿整个系统的核心数据结构。理解这些结构是阅读后续代码的前提。所有模型都是 dataclass，序列化通过 to_dict() 方法完成——不依赖 pydantic 或 marshmallow。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# TaskState：核心类，封装了系统的关键行为和状态\nclass TaskState(str, Enum):\n# 定义枚举值，每个值代表任务生命周期中的一个阶段\n    PENDING = \"PENDING\"        # 任务已创建\n    PLANNING = \"PLANNING\"      # 正在解析 diff\n    EXECUTING = \"EXECUTING\"    # 正在执行审查\n    REVIEWING = \"REVIEWING\"    # 正在生成报告\n    SUCCESS = \"SUCCESS\"        # 审查完成\n    FAILED = \"FAILED\"          # 执行失败\n    CANCELLED = \"CANCELLED\"    # 用户取消\n\n# Severity：核心类，封装了系统的关键行为和状态\nclass Severity(str, Enum):\n    CRITICAL = \"critical\"      # 可利用的安全漏洞\n    HIGH = \"high\"              # 高风险问题\n    MEDIUM = \"medium\"          # 中等风险\n    LOW = \"low\"                # 低风险/建议",
+                "caption": "任务状态机和严重级别枚举"
+              }
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "@dataclass\n# Finding：数据类，自动初始化字段并生成构造函数\nclass Finding:\n    rule_id: str          # 规则标识符，如 SEC-EVAL、REL-DEBUG-PRINT\n    severity: Severity    # 严重级别\n    title: str            # 简短标题\n    explanation: str      # 详细解释（为什么这是问题）\n    path: str             # 文件路径\n    line: int             # 行号（新文件行号）\n    evidence: str         # 证据（引用的代码行）\n    fix: str              # 修复建议\n    test: str             # 测试建议\n    confidence: float     # 置信度 0.0-1.0\n\n@dataclass\n# ReviewReport：数据类，自动初始化字段并生成构造函数\nclass ReviewReport:\n    repository: str\n    pull_request: Optional[int]\n    summary: str               # 审查摘要\n    risk: str                  # high/medium/low\n    findings: List[Finding]    # 发现的问题列表\n    files_reviewed: List[str]  # 审查的文件列表\n    reviewer: str              # 审查器名称\n    collaboration: Dict        # 多Agent协作摘要",
+                "caption": "核心输出结构：Finding 和 ReviewReport"
+              }
+            },
+            {
+              "type": "text",
+              "text": "注意 Finding 的 confidence 字段——它在后续的 CriticAgent 质疑和 VerifierAgent 验证中会被动态调整。初始置信度由 Reviewer 设定（规则审查器固定 0.9，LLM 审查器由模型输出），Critic 会根据证据质量加减，最终 Verifier 根据综合判断决定是否批准。"
+            },
+            {
+              "type": "diagram",
+              "diagram": {
+                "language": "mermaid",
+                "content": "classDiagram\n    class TaskState {\n        <<enum>>\n        PENDING\n        PLANNING\n        EXECUTING\n        REVIEWING\n        SUCCESS\n        FAILED\n        CANCELLED\n    }\n    class Finding {\n        +str rule_id\n        +Severity severity\n        +str title\n        +str explanation\n        +str path\n        +int line\n        +str evidence\n        +str fix\n        +str test\n        +float confidence\n    }\n    class ReviewReport {\n        +str repository\n        +str summary\n        +str risk\n        +List~Finding~ findings\n        +List~str~ files_reviewed\n        +str reviewer\n        +Dict collaboration\n    }\n    class ChangedLine {\n        +str path\n        +int line\n        +str content\n    }\n    ReviewReport \"1\" *-- \"*\" Finding\n    Finding --> Severity",
+                "caption": "核心数据模型关系图"
+              }
+            },
+            {
+              "type": "text",
+              "text": "理解了 TaskState、Finding、ReviewReport 等核心数据结构后，下一章补充 Unified Diff、Webhook、状态机等前置知识，为理解架构全景做准备。"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,503 @@
+{
+  "chapters": [
+    {
+      "id": "evaluation",
+      "title": "评测系统",
+      "sections": [
+        {
+          "title": "背景知识：评测系统的两个层次",
+          "anchor": "practice-eval-background",
+          "groupTitle": "评测系统模块",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 8,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "Skill 沙箱解决了自定义审查代码的安全问题。但系统持续进化时，还有一个关键问题：如何证明新版本的提示词或 Skill 确实比旧版本更好？评测系统提供严格的答案——用受控数据集和客观指标来量化审查质量，而不是靠感觉判断。"
+            },
+            {
+              "type": "text",
+              "text": "EvoAgent 有两层评测：(1) EvolutionEngine 中的 RegressionEvaluator——快速评测提示词变更的效果（precision/recall/F1）；(2) EndToEndEvaluationHarness——完整的端到端评测，包含 CWE 匹配、修复验证、数据集指纹。"
+            },
+            {
+              "type": "text",
+              "text": "两层评测解决不同问题：RegressionEvaluator 用于进化门禁（快速判断候选是否值得激活），EndToEndEvaluationHarness 用于发布决策（严格判断是否可以部署到生产）。"
+            }
+          ]
+        },
+        {
+          "title": "RegressionEvaluator：快速评测提示词效果",
+          "anchor": "practice-eval-regression",
+          "groupTitle": "评测系统模块",
+          "difficulty": "advanced",
+          "estimatedMinutes": 15,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "RegressionEvaluator 在进化引擎中使用。它接收一个提示词和一组评测样本，用该提示词创建 Reviewer，然后回放所有样本，计算 precision/recall/F1 等指标。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# evolution.py 第 60-195 行\n# RegressionEvaluator：核心类，封装了系统的关键行为和状态\nclass RegressionEvaluator:\n    def __init__(self, reviewer_factory):\n        self.reviewer_factory = reviewer_factory  # 工厂函数：prompt → Reviewer\n\n    def run(self, prompt: str, cases: List[dict]) -> Dict[str, Any]:\n        reviewer = self.reviewer_factory(prompt)\n        \n        true_positive = false_positive = false_negative = 0\n        severity_hits = matched = clean_hits = clean_total = 0\n        high_severity_hits = high_severity_total = 0\n        errors = []\n        \n        for case in cases:\n        # 执行核心评测逻辑\n            # 初始化列表 expected_items，用于收集/存储多条数据\n            expected_items = list(case.get(\"expected\", []))\n            clean_total += int(not expected_items)  # 无 expected 的是干净样本\n            \n            try:\n                parsed = parse_unified_diff(case[\"diff\"])\n                findings = reviewer.review(case[\"diff\"], parsed)\n                \n                # 初始化字典 predicted，用于存储键值对数据\n                predicted = {}\n                for finding in findings:\n                    key = (finding.path, int(finding.line), finding.rule_id)\n                    severity = finding.severity.value\n                    # 同一位置保留最高严重级别\n                    if key not in predicted or SEVERITY_RANK[severity] > SEVERITY_RANK[predicted[key]]:\n                        # 初始化字典 predicted[key]，用于存储键值对数据\n                        predicted[key] = severity\n                \n                # 计算 TP/FP/FN\n                # 初始化字典 unmatched，用于存储键值对数据\n                unmatched = set(predicted)\n                tp = 0\n                for expected in expected_items:\n                    path = str(expected[\"path\"])\n                    line = int(expected[\"line\"])\n                    rule_id = str(expected.get(\"rule_id\", \"\"))\n                    minimum = str(expected.get(\"min_severity\", \"low\"))\n                    \n                    # 查找匹配的预测\n                    candidates = [k for k in unmatched\n                                 if k[0] == path and k[1] == line\n                                 and (not rule_id or k[2] == rule_id)]\n                    if not candidates:\n                        continue\n                    \n                    # 初始化字典 selected，用于存储键值对数据\n                    selected = max(candidates, key=lambda k: SEVERITY_RANK[predicted[k]])\n                    unmatched.remove(selected)\n                    tp += 1\n                    \n                    # 检查严重级别是否达标\n                    if SEVERITY_RANK[predicted[selected]] >= SEVERITY_RANK[minimum]:\n                        severity_hits += 1\n                    if SEVERITY_RANK[minimum] >= SEVERITY_RANK[\"high\"]:\n                        high_severity_hits += 1\n                \n                true_positive += tp\n                false_positive += len(unmatched)  # 未匹配的预测 = 误报\n                false_negative += len(expected_items) - tp  # 未匹配的期望 = 漏报\n                \n                if not expected_items and not predicted:\n                    clean_hits += 1  # 干净样本正确判断\n                    \n            except Exception as exc:\n                errors.append({\"name\": case[\"name\"], \"error\": str(exc)[:500]})\n                false_negative += len(expected_items)  # 执行失败算漏报\n        \n        # 计算指标\n        precision = true_positive / (true_positive + false_positive) if (true_positive + false_positive) else 0.0\n        recall = true_positive / (true_positive + false_negative) if (true_positive + false_negative) else 1.0\n        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) else 0.0\n        severity_accuracy = severity_hits / matched if matched else 1.0\n        clean_accuracy = clean_hits / clean_total if clean_total else 1.0\n        high_severity_recall = high_severity_hits / high_severity_total if high_severity_total else 1.0\n        \n        # 综合分数：F1 权重 65%，严重级别准确率 15%，干净准确率 20%\n        score = (f1 * 0.65 + severity_accuracy * 0.15 + clean_accuracy * 0.20)\n        score *= (len(cases) - len(errors)) / len(cases)  # 乘以成功率\n        \n        return {\n            \"score\": round(score, 4),\n            \"precision\": round(precision, 4),\n            \"recall\": round(recall, 4),\n            \"f1\": round(f1, 4),\n            \"severity_accuracy\": round(severity_accuracy, 4),\n            \"high_severity_recall\": round(high_severity_recall, 4),\n            \"clean_accuracy\": round(clean_accuracy, 4),\n            \"cases\": len(cases),\n            \"errors\": errors,\n        }",
+                "caption": "RegressionEvaluator：precision/recall/F1 + 严重级别准确率 + 干净样本准确率"
+              }
+            }
+          ]
+        },
+        {
+          "title": "EndToEndEvaluationHarness：完整的端到端评测",
+          "anchor": "practice-eval-e2e",
+          "groupTitle": "评测系统模块",
+          "difficulty": "advanced",
+          "estimatedMinutes": 20,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "EndToEndEvaluationHarness 是更严格的评测系统。它从 JSONL 文件加载评测数据集，使用 CWE（通用弱点枚举）匹配而不是简单的 rule_id 匹配，还支持修复验证。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# evaluation_harness.py 第 18-40 行\nRULE_TO_CWE = {\n    \"SEC-EVAL\": \"CWE-95\",              # 动态代码执行\n    \"SEC-SUBPROCESS-SHELL\": \"CWE-78\",  # OS 命令注入\n    \"SEC-HARDCODED-SECRET\": \"CWE-798\", # 硬编码凭据\n    \"SEC-SQL-CONCAT\": \"CWE-89\",        # SQL 注入\n    \"REL-EMPTY-EXCEPT\": \"CWE-703\",     # 不当异常处理\n    \"REL-DEBUG-PRINT\": \"CWE-532\",      # 日志泄露\n    # ... 更多规则到 CWE 的映射\n}\n\n# evaluation_harness.py 第 258-376 行\n# EndToEndEvaluationHarness：核心类，封装了系统的关键行为和状态\nclass EndToEndEvaluationHarness:\n    def __init__(self, line_tolerance=2, repairer=None):\n        self.line_tolerance = line_tolerance  # 行号容差\n        self.repairer = repairer              # 可选的修复验证器\n\n    def run(self, reviewer, cases, name=\"\"):\n        totals = self._empty_totals()\n        # 初始化列表 case_results，用于收集/存储多条数据\n        case_results = []\n        \n        for case in cases:\n            result = self._run_case(reviewer, case)\n            case_results.append(result)\n            self._accumulate(totals, result)\n        \n        metrics = self._metrics(totals)\n        \n        # 按 split 分组统计（validation/holdout）\n        # 初始化字典 by_split，用于存储键值对数据\n        by_split = {}\n        for split in (\"validation\", \"holdout\"):\n            selected = [r for r in case_results if r[\"split\"] == split]\n            split_totals = self._empty_totals()\n            for item in selected:\n                self._accumulate(split_totals, item)\n            by_split[split] = self._metrics(split_totals)\n        \n        return {\n            \"reviewer\": reviewer.name,\n            \"dataset\": {\n                \"cases\": len(cases),\n                \"sha256\": dataset_fingerprint(cases),  # 数据集指纹\n            },\n            \"metrics\": metrics,\n            \"by_split\": by_split,\n            \"case_results\": case_results,\n        }\n\n    # _run_case：内部辅助方法，供类内部其他方法调用\n    def _run_case(self, reviewer, case):\n        # 初始化列表 expected，用于收集/存储多条数据\n        expected = list(case[\"expected_findings\"])\n        parsed = parse_unified_diff(case[\"diff\"])\n        findings = reviewer.review(case[\"diff\"], parsed)\n        \n        # 二分图匹配：CWE + 行号容差\n        matches = one_to_one_match(expected, findings, self.line_tolerance)\n        \n        result = {\n            \"id\": case[\"id\"],\n            \"tp\": len(matches),\n            \"fp\": len(findings) - len(matches),\n            \"fn\": len(expected) - len(matches),\n            \"matches\": [],\n        }\n        \n        for match in matches:\n            truth = expected[match.expected_index]\n            finding = findings[match.predicted_index]\n            \n            # 验证修复（如果配置了 repairer）\n            if self.repairer:\n                repair = self.repairer.repair(case, finding)\n                result[\"repair_passed\"] += int(repair[\"passed\"])\n        \n        return result",
+                "caption": "EndToEndEvaluationHarness：CWE 匹配 + 二分图匹配 + 修复验证"
+              }
+            }
+          ]
+        },
+        {
+          "title": "comparison_summary：发布门禁",
+          "anchor": "eval-harness-release-gate",
+          "groupTitle": "评测系统模块",
+          "difficulty": "advanced",
+          "estimatedMinutes": 10,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "comparison_summary() 是发布决策的核心——它对比 baseline 和 candidate 的评测结果，通过 7 道门禁决定是否允许发布。只有所有门禁全部通过，release_gate.passed 才为 true。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# comparison_summary：公开方法，实现核心业务逻辑\ndef comparison_summary(baseline, candidate, ...) -> dict:\n    gates = {\n        # 1. validation F1 必须提升 ≥ 0.02\n        \"validation_f1_improvement\": candidate.validation.f1 >= baseline.validation.f1 + 0.02,\n        # 2. 高风险召回率不能下降\n        \"high_risk_recall_non_regression\": candidate.high_risk_recall >= baseline.high_risk_recall,\n        # 3. 干净样本准确率不能下降\n        \"clean_accuracy_non_regression\": candidate.clean_accuracy >= baseline.clean_accuracy,\n        # 4. holdout F1 不能下降\n        \"holdout_f1_non_regression\": candidate.holdout.f1 >= baseline.holdout.f1,\n        # 5. 执行成功率 ≥ 98%\n        \"execution_success\": candidate.execution_success_rate >= 0.98,\n        # 6. 安全修复率 ≥ 75%\n        \"safe_fix_rate\": candidate.safe_fix_rate >= 0.75,\n        # 7. 端到端安全修复率 ≥ 60%\n        \"e2e_security_fix_rate\": candidate.e2e_security_fix_rate >= 0.60,\n    }\n    # 8. 数据来源门禁：必须全部来自 public-github-pr\n    provenance_gate = source_kinds == {\"public-github-pr\"}\n\n    return {\n        \"deltas\": {metric: candidate - baseline for metric in metrics},\n        \"release_gate\": {\n            \"passed\": all(gates.values()) and provenance_gate,\n            \"quantitative_passed\": all(gates.values()),\n            \"production_activation_allowed\": all(gates.values()) and provenance_gate,\n            \"gates\": gates,\n        },\n    }",
+                "caption": "comparison_summary：7 道量化门禁 + 1 道数据来源门禁"
+              }
+            },
+            {
+              "type": "text",
+              "text": "注意两道独立的通过标志：(1) quantitative_passed 只看 7 道数值门禁（F1 提升、召回不退化、修复率达标）；(2) production_activation_allowed 还要求数据来源门禁通过（数据集必须全部来自真实 GitHub PR）。当前默认数据集标记为 synthetic-controlled，所以即使数值全部达标，production_activation_allowed 仍为 false——这是有意设计，防止合成数据上的好分数被误认为生产性能。"
+            }
+          ]
+        },
+        {
+          "title": "两套 Harness 的区别",
+          "anchor": "eval-harness-distinction",
+          "groupTitle": "Evaluation Harness 详解",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 8,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "在 07-运行时 中你已了解 ReviewHarness 负责线上审查流程。这里介绍的是另一套完全独立的评测 Harness（EndToEndEvaluationHarness），专门用于离线评测。项目里有两套名称相近的实现：(1) evoagent/harness.py 中的 ReviewHarness，负责执行一轮真实的 PR 代码审查；(2) evoagent/evaluation_harness.py 中的 EndToEndEvaluationHarness，负责离线评测审查器、验证自动修复，并执行发布门禁。它们解决的是两个不同问题。"
+            },
+            {
+              "type": "table",
+              "table": {
+                "headers": [
+                  "项目",
+                  "ReviewHarness",
+                  "EndToEndEvaluationHarness"
+                ],
+                "rows": [
+                  [
+                    "源码",
+                    "evoagent/harness.py",
+                    "evoagent/evaluation_harness.py"
+                  ],
+                  [
+                    "目的",
+                    "执行一轮线上或业务审查",
+                    "评测审查器和修复流程"
+                  ],
+                  [
+                    "输入",
+                    "task_id、仓库、PR 编号、unified diff",
+                    "Reviewer 和一组评测 case"
+                  ],
+                  [
+                    "输出",
+                    "ReviewReport",
+                    "包含数据集摘要、指标、分区结果和逐 case 结果的字典"
+                  ],
+                  [
+                    "是否持久化任务状态",
+                    "是",
+                    "不使用任务 Store 保存审查任务状态"
+                  ],
+                  [
+                    "是否有状态机",
+                    "有，PENDING 到 SUCCESS",
+                    "没有业务任务状态机，按 case 循环执行"
+                  ],
+                  [
+                    "是否支持 checkpoint",
+                    "支持，按三个节点保存",
+                    "不保存节点 checkpoint"
+                  ],
+                  [
+                    "典型入口",
+                    "ReviewService.create_review()",
+                    "scripts/run_e2e_evaluation.py"
+                  ]
+                ]
+              }
+            },
+            {
+              "type": "text",
+              "text": "评测 Harness 并不会通过 ReviewHarness.run() 来执行真实任务。它直接解析 case 的 diff，直接调用 Reviewer，再在内存中计算匹配和修复结果。这样评测不会因为任务数据库、队列状态或线上 trace 影响指标。"
+            },
+            {
+              "type": "text",
+              "text": "在深入评测细节之前，先理解几个核心概念：\n\n**什么是 TP / FP / FN？** 这三个缩写来自分类任务评估：\n- **TP（True Positive，真阳性）**= 审查器报告了一个问题，这个问题确实存在。类比：消防报警，确实着火了。\n- **FP（False Positive，假阳性/误报）**= 审查器报告了一个问题，但实际上不是问题。类比：消防报警，但只是烤面包冒烟。\n- **FN（False Negative，假阴性/漏报）**= 审查器没有报告，但实际存在问题。类比：着火了但消防没报警。\n\n**什么是 CWE？** CWE（Common Weakness Enumeration，通用弱点枚举）是安全漏洞的标准分类编号系统。就像医学上的 ICD 疾病编码——每种安全弱点都有唯一编号。比如 CWE-89 是 SQL 注入，CWE-79 是跨站脚本。项目用 CWE 编号来匹配审查器发现的问题与评测数据集中的预期问题。\n\n**什么是一对一匹配？** 评测时需要把审查器实际发现的 Finding 与数据集中标注的预期 Finding 配对。就像考试阅卷——把学生的答案与标准答案逐题对照，每道题只计一次分。项目使用贪心二分图匹配算法：按（路径、行号区间、CWE 类型）三元组进行匹配。「二分图」是指两组节点（实际发现 vs 预期发现）之间的配对关系，每条连线表示一个可能的匹配。「贪心」是指按优先级从高到低依次配对，每对一旦匹配就不再参与后续配对。这样保证每个实际 Finding 最多匹配一个预期 Finding，避免一个发现被重复计分。"
+            }
+          ]
+        },
+        {
+          "title": "评测 Case 的结构与校验",
+          "anchor": "eval-harness-case",
+          "groupTitle": "Evaluation Harness 详解",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 10,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "每个评测 case 必须包含以下字段。validate_case() 会检查数据合法性，防止评测集自身不合法导致把数据错误误判成 Reviewer 性能问题。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "{\n    \"id\": \"owner/repo#123\",           # 唯一标识\n    \"repository\": \"owner/repo\",        # 仓库名\n    \"pull_request\": 123,               # PR 编号\n    \"split\": \"validation\",             # 分区：validation 或 holdout\n    \"diff\": \"...unified diff...\",      # 标准 unified diff\n    \"expected_findings\": [             # 期望发现的 Finding\n        {\n            \"path\": \"app.py\",          # 文件路径\n            \"start_line\": 10,          # 起始行号\n            \"end_line\": 12,            # 结束行号\n            \"cwe\": \"CWE-95\",           # CWE 类型\n            \"severity\": \"critical\"     # 严重级别\n        }\n    ]\n}\n\n# 校验规则：\n# - split 只能是 validation 或 holdout\n# - diff 必须能解析出文件和新增行\n# - severity 必须是 low/medium/high/critical\n# - 起始行不能大于结束行\n# - 标注的路径和行号范围必须覆盖某个新增行\n# - case id 不能重复",
+                "caption": "评测 Case 结构与校验规则"
+              }
+            }
+          ]
+        },
+        {
+          "title": "Rule ID 到 CWE 的归一化",
+          "anchor": "eval-harness-cwe",
+          "groupTitle": "Evaluation Harness 详解",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 8,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "不同 Reviewer 可能使用项目内部 rule id，但评测器不直接把 rule id 当作最终身份。RULE_TO_CWE 会把规则映射到 CWE（通用弱点枚举），匹配时比较归一化后的 CWE，而不是要求预测结果必须使用和标注完全相同的 rule id。"
+            },
+            {
+              "type": "table",
+              "table": {
+                "headers": [
+                  "Rule ID",
+                  "CWE",
+                  "含义"
+                ],
+                "rows": [
+                  [
+                    "SEC-EVAL",
+                    "CWE-95",
+                    "动态代码执行"
+                  ],
+                  [
+                    "SEC-SUBPROCESS-SHELL",
+                    "CWE-78",
+                    "OS 命令注入"
+                  ],
+                  [
+                    "SEC-HARDCODED-SECRET",
+                    "CWE-798",
+                    "硬编码凭据"
+                  ],
+                  [
+                    "SEC-SQL-CONCAT",
+                    "CWE-89",
+                    "SQL 注入"
+                  ],
+                  [
+                    "REL-EMPTY-EXCEPT",
+                    "CWE-703",
+                    "不当异常处理"
+                  ],
+                  [
+                    "REL-DEBUG-PRINT",
+                    "CWE-532",
+                    "日志泄露"
+                  ]
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "title": "一对一 Finding 匹配算法",
+          "anchor": "eval-harness-matching",
+          "groupTitle": "Evaluation Harness 详解",
+          "difficulty": "advanced",
+          "estimatedMinutes": 15,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "one_to_one_match() 只有在以下条件全部满足时才允许匹配：(1) 路径相同（比较前去掉 a/ 或 b/ 前缀并统一斜杠）；(2) CWE 相同；(3) 预测行在期望的起止行范围内，或者距离范围边缘不超过默认 2 行。"
+            },
+            {
+              "type": "text",
+              "text": "匹配不是简单的双重循环。代码先构造 expected 和 predicted 之间的候选边，再执行最大基数的二分图匹配。候选较少的 expected 会优先处理，防止一个宽范围标注先消耗掉某个窄范围标注唯一可用的预测结果。一个预测 Finding 只能匹配一个期望 Finding，一个期望 Finding 也只能被命中一次。重复报告不会重复获得 TP，其余重复项会进入 FP。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# 匹配条件\n# 1. 路径相同（去掉 a/ b/ 前缀）\n# 2. CWE 相同\n# 3. 行号在范围内（容差默认 2 行）\n\n# 评测指标计算\n# Precision = TP / (TP + FP)\n# Recall    = TP / (TP + FN)\n# F1        = 2 * P * R / (P + R)\n# severity_accuracy = 严重等级完全一致的 TP / 总 TP\n# high_risk_recall = 命中的 high/critical 期望 / 全部 high/critical 期望\n# clean_accuracy = 干净 PR 无 Finding 的 case / 全部干净 case\n# execution_success_rate = 正常完成的 case / 全部 case\n# safe_fix_rate = 通过修复检查的补丁 / 所有尝试修复的补丁\n# e2e_security_fix_rate = 正确检测且修复通过的 case / 全部风险 case",
+                "caption": "一对一匹配算法与评测指标"
+              }
+            }
+          ]
+        },
+        {
+          "title": "数据集指纹与评测命令",
+          "anchor": "eval-harness-fingerprint",
+          "groupTitle": "Evaluation Harness 详解",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 8,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "dataset_fingerprint() 会按 case id 排序，对每个 case 做规范化 JSON 编码，然后计算 SHA-256。它不依赖 JSONL 中的行顺序、空格或字段顺序。这样可以确认两次指标比较使用的确实是同一批被评分数据。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "bash",
+                "content": "# 运行评测（默认生成受控数据集并评测三臂）\npython scripts/run_e2e_evaluation.py\n\n# 复用已有 JSONL 数据集\npython scripts/run_e2e_evaluation.py --reuse-dataset\n\n# 输出文件\n# output/evaluation/evaluation-report.json\n# output/evaluation/evaluation-report.md",
+                "caption": "评测命令"
+              }
+            },
+            {
+              "type": "text",
+              "text": "默认行为：(1) 生成受控 PR Diff 数据集（100 个 case，40 个风险样本，60 个干净样本）；(2) 写入 evaluation_data/pr_diff_100.jsonl；(3) 用原始 6 条本地规则运行 legacy-local-reference；(4) 用覆盖相同 14 条规则的单 Reviewer 运行 single-agent-rule-parity-baseline；(5) 用覆盖相同 14 条规则的多 Agent 运行 multi-agent-candidate；(6) 写入 JSON 和 Markdown 报告。"
+            },
+            {
+              "type": "text",
+              "text": "当前数据集的 source.kind 是 synthetic-controlled。即使数值门禁通过，生产激活仍会被数据来源门禁挡住。只有数据来源全部是 public-github-pr 时才允许生产激活。"
+            }
+          ]
+        },
+        {
+          "title": "回归测试断言：受控数据集的固定指标",
+          "anchor": "eval-harness-test-assertions",
+          "groupTitle": "Evaluation Harness 详解",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 8,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "tests/test_evaluation_harness.py 对默认受控数据集做了严格的数值断言，用来防止评测实现悄悄改变口径。这些数字是受控 fixture 的回归断言，不是公开真实 PR 上的生产性能结论。"
+            },
+            {
+              "type": "table",
+              "table": {
+                "headers": [
+                  "断言项",
+                  "期望值",
+                  "说明"
+                ],
+                "rows": [
+                  [
+                    "总 case 数",
+                    "100",
+                    "40 个风险 case + 60 个干净 case"
+                  ],
+                  [
+                    "validation 仓库",
+                    "8 个",
+                    "与 holdout 不重叠"
+                  ],
+                  [
+                    "holdout 仓库",
+                    "2 个",
+                    "用于最终验证"
+                  ],
+                  [
+                    "source.kind",
+                    "synthetic-controlled",
+                    "数据来源标记"
+                  ],
+                  [
+                    "legacy reference TP/FP/FN",
+                    "25/5/15",
+                    "原始 6 条规则的基线"
+                  ],
+                  [
+                    "baseline TP/FP/FN",
+                    "33/7/7",
+                    "单 Agent 14 条规则"
+                  ],
+                  [
+                    "candidate TP/FP/FN",
+                    "33/7/7",
+                    "多 Agent 14 条规则"
+                  ],
+                  [
+                    "F1（baseline & candidate）",
+                    "0.825",
+                    "两者相同"
+                  ],
+                  [
+                    "safe_fix_rate",
+                    "0.7879",
+                    "修复通过率"
+                  ],
+                  [
+                    "e2e_security_fix_rate",
+                    "0.65",
+                    "端到端安全修复率"
+                  ]
+                ]
+              }
+            },
+            {
+              "type": "text",
+              "text": "关键发现：candidate 和 baseline 的 TP/FP/FN 完全相同（33/7/7），F1 也相同（0.825）。这说明当前 Recall/F1 提升来自规则扩充（从 6 条到 14 条），而不是多 Agent 编排。多 Agent 的价值体现在证据验证和协作推理上，但在受控数据集上尚未体现出指标差异。"
+            }
+          ]
+        },
+        {
+          "title": "受控基准数据集：evaluation_benchmark.py",
+          "anchor": "eval-harness-benchmark",
+          "groupTitle": "Evaluation Harness 详解",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 10,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "evaluation_benchmark.py（316行）生成了默认的 100 个受控评测 case。它不依赖真实 GitHub PR，而是用程序化方式构造可复现的 diff 数据集。数据集标记为 synthetic-controlled，不能用于声称生产性能。"
+            },
+            {
+              "type": "table",
+              "table": {
+                "headers": [
+                  "组成部分",
+                  "数量",
+                  "说明"
+                ],
+                "rows": [
+                  [
+                    "风险场景（_risk_scenarios）",
+                    "40 个",
+                    "19 个 high/critical + 21 个 medium/low"
+                  ],
+                  [
+                    "干净样本（_clean_source）",
+                    "60 个",
+                    "无安全风险的正常代码变更"
+                  ],
+                  [
+                    "总 case 数",
+                    "100 个",
+                    "40 风险 + 60 干净"
+                  ],
+                  [
+                    "仓库数",
+                    "10 个",
+                    "acme/service-01 ~ service-10"
+                  ],
+                  [
+                    "validation 仓库",
+                    "8 个",
+                    "前 8 个仓库"
+                  ],
+                  [
+                    "holdout 仓库",
+                    "2 个",
+                    "后 2 个仓库（service-09, service-10）"
+                  ]
+                ]
+              }
+            },
+            {
+              "type": "text",
+              "text": "风险场景覆盖 19 种 CWE 类型，每种类型有指定数量的样本。高风险类型（eval、subprocess shell、hardcoded secret、SQL concat）各有 4 个样本，其他类型各 1 个。每个场景定义了 risk_pattern（用于验证修复是否消除了风险）和 required_after_patterns（修复后应出现的模式）。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# 风险场景示例\nadd(\"SEC-EVAL\", \"critical\",\n    \"result = eval(value)\",        # 注入的危险代码行\n    r\"\\beval\\s*\\(\",                # 风险匹配模式\n    r\"json\\.loads\",                # 修复后应出现的模式\n    4)                              # 4 个样本\n\n# 三臂评测器\n# baseline_reviewer：公开方法，实现核心业务逻辑\ndef baseline_reviewer():            # 单臂：原始 6 条本地规则\n    return LocalRuleReviewer()\n\n# candidate_reviewer：公开方法，实现核心业务逻辑\ndef candidate_reviewer():           # 多 Agent：本地规则 + ContextRuleReviewer\n    return MultiAgentCoordinator([LocalRuleReviewer(), ContextRuleReviewer()])\n\n# ContextRuleReviewer 额外提供 8 条规则（SEC-PATH-TRAVERSAL、SEC-YAML-LOAD 等）\n# 用于演示 candidate 比 baseline 多覆盖的场景",
+                "caption": "受控数据集：40 个风险场景 + 三臂评测器"
+              }
+            },
+            {
+              "type": "text",
+              "text": "generate_controlled_pr_cases() 为每个场景生成 unified diff 格式的变更。风险样本引入危险代码模式（如 eval()、shell=True），干净样本引入安全代码模式（如参数化查询、环境变量）。diff 使用 difflib.unified_diff 生成，保证格式与真实 GitHub PR diff 一致。"
+            }
+          ]
+        },
+        {
+          "title": "当前实现的边界",
+          "anchor": "eval-harness-boundaries",
+          "groupTitle": "Evaluation Harness 详解",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 5,
+          "blocks": [
+            {
+              "type": "list",
+              "list": {
+                "style": "unordered",
+                "items": [
+                  {
+                    "content": "超时不是硬杀进程：timeout_seconds 是 Harness 的时间预算，代码在节点开始和状态迁移等位置检查时间，但不会从外部线程杀掉卡住的 Python 函数"
+                  },
+                  {
+                    "content": "Checkpoint 是节点级，不是指令级：一次 executing 只有在整个 Reviewer 或多 Agent 协作返回后才会保存成功 checkpoint"
+                  },
+                  {
+                    "content": "取消是协作式取消：取消标志会在下一个预算检查点生效，不等于立即中断正在运行的模型调用"
+                  },
+                  {
+                    "content": "FixtureRepairer 不能代表生产修复：评测用修复器是确定性的 fixture 转换器，生产修复由 SafeFixer、GitHub、权限校验共同完成"
+                  },
+                  {
+                    "content": "合成评测数据不能证明生产效果：默认数据集来源是 synthetic-controlled，代码保留 production_data_provenance 门禁"
+                  },
+                  {
+                    "content": "Harness 不会替代 Reviewer 的判断：Harness 负责让流程可控、可恢复、可追踪，检测质量仍然来自规则、Agent、Skill、证据验证和评测集"
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "title": "模块总结",
+          "anchor": "practice-eval-summary",
+          "groupTitle": "评测系统模块",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 3,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "评测系统的设计原则：(1) 两层评测——快速评测（RegressionEvaluator）用于进化门禁，端到端评测（EndToEndEvaluationHarness）用于发布决策；(2) CWE 标准化——使用通用弱点枚举而不是自定义 rule_id，便于跨工具比较；(3) 数据集指纹——SHA-256 指纹保证评测结果可复现，防止两次评测之间因数据集变化导致指标差异被误认为系统改进；(4) 隐藏集保护——隐藏集只返回聚合指标，不暴露案例详情，防止过拟合；(5) 修复验证——端到端评测包含修复门禁，确保 finding 可以自动修复；(6) 三臂评测——对比 legacy（原始 6 条规则基线）、baseline（单 Agent 14 条规则）、candidate（多 Agent 14 条规则）三个「arm」（类比临床试验中的「治疗臂」，每个 arm 代表一个被评测的系统版本）。这些原则保证评测结果可信、可复现、防过拟合。"
+            },
+            {
+              "type": "text",
+              "text": "评测系统保证了进化质量。接下来的章节从实操角度出发，带你从零完成一次完整的端到端部署。"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

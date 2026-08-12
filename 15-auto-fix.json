@@ -1,0 +1,254 @@
+{
+  "chapters": [
+    {
+      "id": "auto-fix",
+      "title": "自动修复",
+      "sections": [
+        {
+          "title": "背景知识：保守的自动修复策略",
+          "anchor": "practice-fix-background",
+          "groupTitle": "自动修复模块",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 8,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "自动修复是一个高风险功能——错误的修复可能引入新 bug。EvoAgent 的设计哲学是「保守修复」：只修复确定性高的问题（调试输出、shell=True、硬编码密钥），修复后必须通过编译和测试门禁，且结果提交到新分支而不是直接修改 PR。"
+            },
+            {
+              "type": "text",
+              "text": "fixer.py（182行）实现修复逻辑，verifier.py（100行）实现验证门禁。两者配合确保修复的安全性。"
+            },
+            {
+              "type": "text",
+              "text": "在深入代码之前，先理解几个核心概念：\n\n**什么是 AST（抽象语法树）？** 在 05-diff-parser 教程中已详细解释。简单回顾：AST 把代码解析成树形结构，能理解代码的语法含义。正则表达式只能做字符串替换，可能误改注释或字符串中的内容；AST 能精确定位到语法元素（如关键字参数 `shell=True`）。项目的 SafeFixer 先用正则快速匹配，再用 AST 精确修复。\n\n**什么是路径遍历攻击？** 路径遍历攻击（Path Traversal Attack）是通过 `../` 序列逃出限定目录的攻击。比如限定只能读 `/data/` 下的文件，攻击者传入 `../../etc/passwd` 就能读到系统密码文件。项目的 RepairVerifier 用 `os.path.realpath()` 检查修复后的文件路径是否在允许的目录内，防止恶意 Skill 通过路径遍历修改系统文件。"
+            }
+          ]
+        },
+        {
+          "title": "SafeFixer：只修复确定性高的问题",
+          "anchor": "practice-fix-safe",
+          "groupTitle": "自动修复模块",
+          "difficulty": "advanced",
+          "estimatedMinutes": 15,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "SafeFixer 只处理 3 种规则：REL-DEBUG-PRINT（删除调试输出）、SEC-SUBPROCESS-SHELL（shell=True→False）、SEC-HARDCODED-SECRET（硬编码密钥→环境变量）。其他规则不修复，因为风险太高。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# SafeFixer：核心类，封装了系统的关键行为和状态\nclass SafeFixer:\n    # propose_line：公开方法，实现核心业务逻辑\n    def propose_line(self, line: str, finding: dict) -> str:\n        rule = finding.get(\"rule_id\")\n        \n        if rule == \"REL-DEBUG-PRINT\":\n            return \"\"  # 直接删除整行\n        \n        if rule == \"SEC-SUBPROCESS-SHELL\":\n            return re.sub(r\"shell\\s*=\\s*True\", \"shell=False\", line)\n        \n        if rule == \"SEC-HARDCODED-SECRET\":\n            match = re.match(r\"(\\s*)([A-Za-z_][A-Za-z0-9_]*)\\s*=\\s*(['\\\"]).+?\\3\\s*$\", line)\n            if match:\n            # 条件分支处理\n                indent, var_name = match.group(1), match.group(2)\n                return '%s%s = os.environ[\"%s\"]' % (indent, var_name, var_name.upper())\n        \n        return line  # 其他规则不修复\n\n    # apply：公开方法，实现核心业务逻辑\n    def apply(self, content: str, findings: List[dict], path: str) -> Dict[str, object]:\n        # Python 文件优先使用 AST 修复（更精确）\n        if path.endswith(\".py\") and hasattr(ast, \"unparse\"):\n            structured = self._apply_python_ast(content, findings, path)\n            if structured[\"rules\"]:\n                return structured\n        \n        # 非 Python 文件使用正则替换\n        lines = content.splitlines()\n        changed = []\n        for finding in sorted(findings, key=lambda x: x.get(\"line\", 0), reverse=True):\n            index = int(finding.get(\"line\", 0)) - 1\n            if 0 <= index < len(lines):\n                replacement = self.propose_line(lines[index], finding)\n                if replacement != lines[index]:\n                    lines[index] = replacement\n                    changed.append(finding.get(\"rule_id\"))\n        \n        return {\"content\": \"\\n\".join(lines) + \"\\n\", \"rules\": changed}",
+                "caption": "SafeFixer：只修复 3 种确定性高的规则"
+              }
+            },
+            {
+              "type": "text",
+              "text": "为什么 Python 文件使用 AST 修复？因为正则替换可能破坏代码结构。例如，删除 print() 语句时，如果 print 在多行字符串中，正则会误删。AST 解析可以精确识别语句边界。\n\n**什么是访问者模式（Visitor Pattern）？** 上面代码中的 `ast.NodeTransformer` 使用了访问者模式——一种遍历树形数据结构的设计模式。原理很简单：遍历 AST 时，遇到不同类型的节点自动调用对应的 `visit_Xxx` 方法。比如遇到 `Expr` 节点（表达式语句）调用 `visit_Expr`，遇到 `Call` 节点（函数调用）调用 `visit_Call`，遇到 `Assign` 节点（赋值语句）调用 `visit_Assign`。就像快递分拣中心——包裹按类型（大件/小件/易碎）自动送到不同的处理通道。`return None` 表示删除该节点，`generic_visit()` 表示继续遍历子节点。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# _apply_python_ast：内部辅助方法，供类内部其他方法调用\ndef _apply_python_ast(self, content, findings, path):\n    targets = {(int(f.get(\"line\", 0)), f.get(\"rule_id\")) for f in findings}\n    changed = []\n    \n    # Transformer：核心类，封装了系统的关键行为和状态\n    class Transformer(ast.NodeTransformer):\n        # visit_Expr：公开方法，实现核心业务逻辑\n        def visit_Expr(inner, node):\n            # 删除 print() 语句\n            if (node.lineno, \"REL-DEBUG-PRINT\") in targets:\n                if isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name):\n                    if node.value.func.id == \"print\":\n                        changed.append(\"REL-DEBUG-PRINT\")\n                        return None  # 删除节点\n            return inner.generic_visit(node)\n        \n        # visit_Call：公开方法，实现核心业务逻辑\n        def visit_Call(inner, node):\n            # shell=True → shell=False\n            node = inner.generic_visit(node)\n            if (node.lineno, \"SEC-SUBPROCESS-SHELL\") in targets:\n                for keyword in node.keywords:\n                    if keyword.arg == \"shell\" and isinstance(keyword.value, ast.Constant):\n                        if keyword.value.value is True:\n                            keyword.value = ast.Constant(False)\n                            changed.append(\"SEC-SUBPROCESS-SHELL\")\n            return node\n        \n        # visit_Assign：公开方法，实现核心业务逻辑\n        def visit_Assign(inner, node):\n            node = inner.generic_visit(node)\n            if (node.lineno, \"SEC-HARDCODED-SECRET\") in targets:\n                if len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):\n                    if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):\n                        name = node.targets[0].id\n                        node.value = ast.Subscript(\n                            value=ast.Attribute(value=ast.Name(id=\"os\"), attr=\"environ\"),\n                            slice=ast.Constant(name.upper()),\n                        )\n                        changed.append(\"SEC-HARDCODED-SECRET\")\n            return node\n    \n    tree = Transformer().visit(ast.parse(content, filename=path))\n    ast.fix_missing_locations(tree)\n    return {\"content\": ast.unparse(tree) + \"\\n\", \"rules\": sorted(set(changed))}",
+                "caption": "AST 修复：精确识别语句边界，避免误伤"
+              }
+            }
+          ]
+        },
+        {
+          "title": "案例实战：PR #42 修复前后对比",
+          "anchor": "practice-fix-case-study",
+          "groupTitle": "自动修复模块",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 10,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "让我们用 PR #42 来看自动修复的实际效果。审查完成后，小王点击了「Create fix branch」按钮。系统调用 `POST /v1/tasks/{task_id}/fix`，SafeFixer 开始工作。"
+            },
+            {
+              "type": "text",
+              "text": "**修复前**（小王提交的原始代码）："
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# deploy.py（PR #42 原始版本）\nimport os\nimport subprocess\n\nAPI_KEY = \"sk-prod-a1b2c3d4e5\"          # ← SEC-HARDCODED-SECRET\nDB_PASSWORD = os.environ.get(\"DB_PASSWORD\", \"\")\n\ndef deploy_service(env):\n    config = fetch_config(env)\n    print(f\"Deploying to {env} with key {API_KEY}\")  # ← REL-DEBUG-PRINT\n    subprocess.run(f\"kubectl apply -f {config}\", shell=True)  # ← SEC-SUBPROCESS-SHELL\n    cursor.execute(\"SELECT * FROM deployments WHERE env='\" + env + \"'\")\n    try:\n        run_smoke_tests(env)\n    # 捕获 Exception                    # ← REL-EMPTY-EXCEPT 异常，执行错误恢复逻辑\n    except Exception:                    # ← REL-EMPTY-EXCEPT\n        pass",
+                "caption": "修复前：deploy.py 原始代码（5 个问题标记）"
+              }
+            },
+            {
+              "type": "text",
+              "text": "**修复后**（SafeFixer 在 evoagent/fix-pr-42-20260810... 分支上）："
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# deploy.py（SafeFixer 修复版本）\nimport os\nimport subprocess\n\nAPI_KEY = os.environ[\"API_KEY\"]         # ✅ 硬编码密钥 → 环境变量\nDB_PASSWORD = os.environ.get(\"DB_PASSWORD\", \"\")\n\ndef deploy_service(env):\n    config = fetch_config(env)\n                                           # ✅ print 语句被删除\n    subprocess.run(f\"kubectl apply -f {config}\", shell=False)  # ✅ shell=True → False\n    cursor.execute(\"SELECT * FROM deployments WHERE env='\" + env + \"'\")\n    try:\n        run_smoke_tests(env)\n    # 捕获 Exception 异常，执行错误恢复逻辑\n    except Exception:\n        pass                               # ⚠️ except 未修复（AST 无法安全修改异常处理）",
+                "caption": "修复后：3 个问题被自动修复，2 个超出能力范围"
+              }
+            },
+            {
+              "type": "text",
+              "text": "注意几个细节：(1) `API_KEY = \"sk-prod-...\"` 被替换为 `API_KEY = os.environ[\"API_KEY\"]`，同时 AST 修复器检测到代码中使用了 `os.environ`，自动在文件顶部添加了 `import os`（虽然本例中已有）；(2) `print(...)` 整行被删除；(3) `shell=True` 被替换为 `shell=False`；(4) `except Exception: pass` 没有被修复——因为 SafeFixer 不知道应该捕获什么具体异常，这超出了白名单修复范围；(5) SQL 拼接没有被修复——因为自动替换可能破坏业务逻辑。"
+            },
+            {
+              "type": "text",
+              "text": "修复结果以原子提交的方式写入新分支 `evoagent/fix-pr-42-20260810120000`，并创建一个 Draft Pull Request（草稿 PR——GitHub 的「草稿」功能，标记为尚未准备好合并的 PR，reviewer 可以看到代码变更但无法点击 Merge 按钮）。小王在 GitHub 上看到一个新的 Draft PR，标题是「fix: verified EvoAgent repairs for #42」。他可以逐个查看修改，决定是否合并。"
+            },
+            {
+              "type": "table",
+              "table": {
+                "headers": [
+                  "规则",
+                  "修复动作",
+                  "修复方式",
+                  "是否自动修复"
+                ],
+                "rows": [
+                  [
+                    "SEC-HARDCODED-SECRET",
+                    "API_KEY = \"...\" → API_KEY = os.environ[\"API_KEY\"]",
+                    "AST 节点替换",
+                    "✅"
+                  ],
+                  [
+                    "SEC-SUBPROCESS-SHELL",
+                    "shell=True → shell=False",
+                    "AST 关键字替换",
+                    "✅"
+                  ],
+                  [
+                    "REL-DEBUG-PRINT",
+                    "print(...) 整行删除",
+                    "AST 节点删除",
+                    "✅"
+                  ],
+                  [
+                    "REL-EMPTY-EXCEPT",
+                    "except Exception → 未修复",
+                    "超出白名单",
+                    "❌"
+                  ],
+                  [
+                    "SEC-SQL-CONCAT",
+                    "SQL 拼接 → 未修复",
+                    "超出白名单",
+                    "❌"
+                  ]
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "title": "RepairVerifier：编译 + 测试门禁",
+          "anchor": "practice-fix-verifier",
+          "groupTitle": "自动修复模块",
+          "difficulty": "advanced",
+          "estimatedMinutes": 12,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "修复后必须通过两道门禁：(1) 编译检查——修复后的代码必须能编译（Python 的 compile()）；(2) 测试检查——如果配置了测试命令，必须在隔离环境中运行测试。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# RepairVerifier：核心类，封装了系统的关键行为和状态\nclass RepairVerifier:\n    def __init__(self, test_command: str = \"\", timeout_seconds: int = 120):\n        self.test_command = test_command\n        self.timeout_seconds = timeout_seconds\n\n    # verify_contents：公开方法，实现核心业务逻辑\n    def verify_contents(self, files: Dict[str, str]) -> dict:\n        \"\"\"编译检查：修复后的代码必须能编译\"\"\"\n        # 初始化列表 checks，用于收集/存储多条数据\n        checks = []\n        for path, content in files.items():\n            if path.endswith(\".py\"):\n                try:\n                    compile(content, path, \"exec\")\n                    checks.append({\"name\": \"compile:%s\" % path, \"passed\": True})\n                # 捕获 SyntaxError as exc 异常，执行错误恢复逻辑\n                except SyntaxError as exc:\n                    checks.append({\n                        \"name\": \"compile:%s\" % path, \"passed\": False,\n                        \"detail\": \"%s:%s: %s\" % (path, exc.lineno, exc.msg),\n                    })\n        return {\"passed\": all(item[\"passed\"] for item in checks), \"checks\": checks}\n\n    # verify_archive：公开方法，实现核心业务逻辑\n    def verify_archive(self, archive: bytes, files: Dict[str, str]) -> dict:\n        \"\"\"完整验证：在隔离环境中解压仓库 + 应用修复 + 运行测试\"\"\"\n        with tempfile.TemporaryDirectory(prefix=\"evoagent-repair-\") as root:\n            # 1. 解压仓库归档\n            with zipfile.ZipFile(BytesIO(archive)) as bundle:\n                for member in bundle.infolist():\n                    # 安全检查：防止路径遍历攻击\n                    normalized = os.path.normpath(member.filename)\n                    if normalized.startswith(\"../\") or normalized.startswith(\"/\"):\n                        raise ValueError(\"unsafe path in archive\")\n                    target = os.path.abspath(os.path.join(root, normalized))\n                    if not target.startswith(os.path.abspath(root) + os.sep):\n                        raise ValueError(\"archive escapes sandbox\")\n                    bundle.extract(member, root)\n            \n            # 2. 应用修复\n            worktree = root  # 简化\n            for path, content in files.items():\n                target = os.path.abspath(os.path.join(worktree, path))\n                os.makedirs(os.path.dirname(target), exist=True)\n                with open(target, \"w\") as f:\n                    f.write(content)\n            \n            # 3. 编译检查\n            compile_result = self.verify_contents(files)\n            if not compile_result[\"passed\"]:\n                return compile_result\n            \n            # 4. 测试检查（如果配置了测试命令）\n            if self.test_command:\n                test_result = self.verify_worktree(worktree)\n                return {\n                    \"passed\": test_result[\"passed\"],\n                    \"checks\": compile_result[\"checks\"] + test_result[\"checks\"],\n                }\n            return compile_result",
+                "caption": "RepairVerifier：编译检查 + 隔离测试 + 路径安全"
+              }
+            }
+          ]
+        },
+        {
+          "title": "分支提交命名与行号倒序处理",
+          "anchor": "practice-fix-branch-order",
+          "groupTitle": "自动修复模块",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 10,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "修复流程：已完成审查任务 → POST /v1/tasks/{id}/fix → 读取 PR head ref 和 SHA → 按文件聚合 Finding → 下载当前文件 → 逐行应用白名单修复 → 创建 evoagent/fix-pr-* 分支 → 每个文件创建提交。如果没有白名单规则命中，接口返回 branch: null，不会创建空分支。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "text",
+                "content": "分支名：evoagent/fix-pr-<PR编号>-<UTC时间戳>  # 如 evoagent/fix-pr-42-20260810120000，确保唯一且可追溯\n提交信息：fix: apply EvoAgent suggestions for <path>  # 每个文件一个提交，消息指明修复的文件路径\n\n行号倒序处理（同一文件）：  # 对同一文件内的多个 Finding，按行号从大到小排序后逐个修复\n  line 30  ← 先处理  # 行号最大的先修复\n  line 20  # 中间行号\n  line 10  ← 最后处理  # 行号最小的最后修复\n\n倒序原因：删除前面的行后，后面 Finding 的索引不会变化。  # 如果先删第 10 行，第 30 行会变成第 29 行，导致行号错位\n处理完后再统一决定是否插入 import os。  # 如果修复中用到了 os.environ，才在文件顶部插入 import os",
+                "caption": "分支命名与行号倒序处理"
+              }
+            },
+            {
+              "type": "text",
+              "text": "系统不会直接改 PR head，也不会改主分支。它创建独立分支，用户决定是否合并。GitHub 评论使用带任务标记的 marker 进行 upsert，避免同一任务反复创建评论。"
+            }
+          ]
+        },
+        {
+          "title": "自动修复的边界与风险",
+          "anchor": "practice-fix-boundaries",
+          "groupTitle": "自动修复模块",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 10,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "自动修复有几个重要边界需要理解："
+            },
+            {
+              "type": "list",
+              "list": {
+                "style": "unordered",
+                "items": [
+                  {
+                    "content": "shell=True 改成 shell=False 后，原来依赖 shell 解析的字符串命令可能不能运行"
+                  },
+                  {
+                    "content": "删除 print 所在行可能破坏多行表达式"
+                  },
+                  {
+                    "content": "在第一行插入 import os 可能跑到 shebang、模块文档字符串或 from __future__ 前面"
+                  },
+                  {
+                    "content": "审查后 PR 继续更新时，报告行号可能过期——任务没有保存当时的 PR head SHA，修复前也没有比较最新 SHA"
+                  },
+                  {
+                    "content": "项目不执行格式化、语法检查、编译、单元测试、安全扫描"
+                  },
+                  {
+                    "content": "创建了修复提交不等于修复已经验证"
+                  }
+                ]
+              }
+            },
+            {
+              "type": "text",
+              "text": "自动修复为什么不直接用 LLM patch？因为 LLM patch 风险大，需要代码上下文、语法校验、测试和人工门禁。当前项目先只做三类白名单文本修复，覆盖面小但行为更容易解释。修复前也不会检查 PR 是否更新——它读取调用时的 PR head，但任务没有保存审查时的 head SHA，无法判断报告是否已经过期。这是当前自动修复的重要并发风险。"
+            }
+          ]
+        },
+        {
+          "title": "模块总结",
+          "anchor": "practice-fix-summary",
+          "groupTitle": "自动修复模块",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 3,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "自动修复模块的设计原则：(1) 保守修复——只处理 3 种确定性高的规则，其他规则不修复；(2) AST 优先——Python 文件使用 AST 修复，避免正则误伤；(3) 双重门禁——编译检查 + 测试检查，任一失败则拒绝修复；(4) 隔离执行——测试在临时目录中运行，不影响主仓库；(5) 安全检查——归档解压时防止路径遍历攻击；(6) 独立分支——修复写到 evoagent/fix-pr-* 分支，不直接改用户分支。这些原则确保自动修复不会引入新 bug。→ 延伸阅读：修复分支推送到 GitHub 的流程详见 14-GitHub 集成教程；修复前的编译/测试门禁与评测 Harness 的修复验证详见 17-评测教程。"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

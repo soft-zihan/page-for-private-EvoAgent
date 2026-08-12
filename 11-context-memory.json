@@ -1,0 +1,168 @@
+{
+  "chapters": [
+    {
+      "id": "context-memory",
+      "title": "上下文与记忆",
+      "sections": [
+        {
+          "title": "背景知识：Token 预算与分层记忆",
+          "anchor": "practice-context-background",
+          "groupTitle": "上下文与记忆模块",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 10,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "LLM 的上下文窗口有限（通常 4K-128K tokens），但 PR diff 可能很大。ContextManager 的任务是在有限预算内组装最有价值的上下文。MemoryManager 则提供跨任务的经验积累——让 Agent 能记住之前犯过的错误和成功的审查模式。"
+            },
+            {
+              "type": "text",
+              "text": "在深入代码之前，先理解几个核心概念：\n\n**什么是 Token？** Token 是 LLM 处理文本的最小单位。英文中大约 1 token ≈ 4 个字符或 ¾ 个单词（如 \"hello\" 是 1 个 token，\"unbelievable\" 是 4 个 token）。中文中大约 1 个汉字 ≈ 1-2 个 token。LLM 有「上下文窗口」限制——比如 128K token 的模型最多只能「看到」约 10 万个中文字。超出这个限制，模型就无法处理。所以项目需要在有限 token 预算内装入最有价值的信息。\n\n**什么是 TTL？** TTL（Time To Live，存活时间）是数据过期后自动失效的机制。就像牛奶的保质期——过了保质期就不能喝了。记忆条目设置 TTL 后，到期会被自动清理，避免过时信息占用空间。\n\n**什么是 Specificity（特异性）？** Specificity 衡量一条记忆的「具体程度」。高特异性记忆很窄、很具体（如「acme/api-service 的 deploy.py 不允许使用 shell=True」），只在非常匹配的场景下才被召回。低特异性记忆很宽泛（如「不要使用 shell=True」），在更多场景下都可能相关。项目用 specificity 评分来平衡：太具体的记忆只在精确匹配时有用，太宽泛的记忆可能不够精准。\n\n**分层记忆类比**：项目的四层记忆借鉴了人类记忆系统——Working Memory 像「便签纸」，记录当前任务的临时信息，任务结束就扔掉；Episodic Memory 像「日记本」，记录每次审查的具体经历（哪些 PR、发现了什么）；Semantic Memory 像「百科全书」，沉淀出通用经验（这类错误要警惕）；Procedural Memory 像「肌肉记忆」，记录操作技能（如何修复某类问题）。"
+            },
+            {
+              "type": "text",
+              "text": "两个模块解决不同时间尺度的问题：ContextManager 解决「单次任务内如何分配有限的 token 预算」，MemoryManager 解决「跨任务如何积累和检索审查经验」。"
+            }
+          ]
+        },
+        {
+          "title": "ContextManager：风险感知的 Diff 压缩",
+          "anchor": "practice-context-compression",
+          "groupTitle": "上下文与记忆模块",
+          "difficulty": "advanced",
+          "estimatedMinutes": 15,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "当 diff 超过 token 预算时，ContextManager 不是简单截断，而是按风险评分排序 hunk，优先保留包含安全关键词（eval、password、auth 等）的变更片段。这种压缩策略确保即使 diff 被大幅压缩，高风险区域也不会丢失。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "RISK_TERMS = {\n    \"eval\", \"exec\", \"shell\", \"subprocess\", \"password\", \"secret\", \"token\",\n    \"auth\", \"permission\", \"sql\", \"query\", \"except\", \"error\", \"migration\",\n    \"payment\", \"deserialize\", \"pickle\", \"yaml.load\", \"chmod\", \"admin\",\n}\n\n# ContextManager：核心类，封装了系统的关键行为和状态\nclass ContextManager:\n    # build：公开方法，实现核心业务逻辑\n    def build(self, diff, assignment=None, memories=()) -> ContextBundle:\n        original_tokens = self.estimate_tokens(diff)\n        available_tokens = self.max_tokens - self.reserved_tokens\n        if original_tokens <= available_tokens:\n            return ContextBundle(diff, False, ...)  # 不需要压缩\n\n        # 1. 按风险评分排序所有 hunk\n        terms = self._priority_terms(assignment, memories)\n        file_headers, hunks = self._parse(diff, terms)\n        # 2. 贪心选择：高分 hunk 优先装入预算\n        for hunk in sorted(hunks, key=lambda h: (-h.score, h.index)):\n            if used + hunk_cost <= byte_budget:\n                selected.append(hunk)\n            else:\n                compact = self._compact_hunk(hunk, remaining, terms)\n                if compact: selected.append(compact)\n        # 3. 按原始顺序重组\n        return ContextBundle(compressed, True, original_tokens, final_tokens,\n                            omitted_files=omitted, strategy=\"risk-ranked-hunk-compression\")",
+                "caption": "风险感知的 Diff 压缩：按安全评分贪心选择 hunk"
+              }
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "@staticmethod\n# _score：内部辅助方法，供类内部其他方法调用\ndef _score(path, text, terms):\n    score = sum(2.0 for term in terms if term and term in lowered)  # 风险词命中\n    score += min(8.0, sum(1 for line in text.splitlines()\n                         if line.startswith(\"+\") and not line.startswith(\"+++\")) * 0.25)\n    if any(token in path.lower() for token in (\"auth\", \"security\", \"payment\", \"migration\")):\n        score += 6.0  # 敏感文件路径加分\n    return score",
+                "caption": "Hunk 评分算法：风险词命中 + 新增行密度 + 敏感路径"
+              }
+            },
+            {
+              "type": "text",
+              "text": "compose() 方法在 Agent Loop 的每一轮重新组装完整上下文。它把 reserved_tokens 分配给以下 7 项内容，这些内容共用统一的 Token 预算："
+            },
+            {
+              "type": "list",
+              "list": {
+                "style": "ordered",
+                "items": [
+                  {
+                    "content": "**当前 Review Assignment**（必须保留）——任务描述、仓库名、PR 编号"
+                  },
+                  {
+                    "content": "**可用工具及参数 Schema**（必须保留）——ToolRegistry 中注册的所有工具定义"
+                  },
+                  {
+                    "content": "**压缩后的 PR Diff**——经风险压缩后的代码变更"
+                  },
+                  {
+                    "content": "**Critic 反馈**——上一轮 Critic 对 findings 的质疑意见"
+                  },
+                  {
+                    "content": "**协作消息摘要**——多 Agent 协作中的 plan-challenge-revise 消息"
+                  },
+                  {
+                    "content": "**最新工具 Observation**——按最新记录优先保留"
+                  },
+                  {
+                    "content": "**召回的历史记忆**——从 MemoryManager 检索的相关经验"
+                  }
+                ]
+              }
+            },
+            {
+              "type": "text",
+              "text": "优先级规则：任务和工具信息优先保留；工具 Observation 按最新记录优先；反馈和记忆根据剩余空间加入。超过预算的旧 Observation、低优先级反馈和记忆会被丢弃，不会随着循环轮数不断累积。每次压缩都会记录原始 Token 估算、压缩后大小、被省略的文件和 Hunk、丢弃的反馈与记忆数量，以及原始 Diff 的 SHA256——这样能在 Trace 中还原某一轮 Agent 实际看到了什么。"
+            }
+          ]
+        },
+        {
+          "title": "MemoryManager：Working/Episodic/Semantic 分层记忆",
+          "anchor": "practice-context-memory",
+          "groupTitle": "上下文与记忆模块",
+          "difficulty": "advanced",
+          "estimatedMinutes": 15,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "MemoryManager 实现了 4 种记忆作用域：working（任务执行中的临时记忆，TTL 24h）、episodic（任务完成后的经验归档）、semantic（从反馈中学到的长期知识）、procedural（操作程序记忆）。每条记忆都有 importance 分数和过期时间。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# MemoryManager：核心类，封装了系统的关键行为和状态\nclass MemoryManager:\n    # recall：公开方法，实现核心业务逻辑\n    def recall(self, tenant_id, repository, query, scopes=(\"semantic\", \"episodic\")):\n        # 1. 清理过期记忆\n        self.store.purge_expired_agent_memories()\n        # 2. 获取候选记忆（最多 200 条）\n        # 初始化列表 candidates，用于收集/存储多条数据\n        candidates = self.store.list_agent_memories(tenant_id, repository, scopes, 200)\n        # 3. 基于 token 重叠的相关性评分\n        query_tokens = _tokens(query)\n        for item in candidates:\n            # 初始化集合 memory_tokens，用于去重和快速查找\n            memory_tokens = set(item[\"keywords\"]) | _tokens(item[\"content\"])\n            overlap = len(query_tokens.intersection(memory_tokens))\n            coverage = overlap / max(1, len(query_tokens))     # 查询覆盖率 55%\n            specificity = overlap / max(1, len(memory_tokens)) # 记忆特异性 15%\n            score = coverage * 0.55 + specificity * 0.15 + importance * 0.25 + 0.05 / (index + 1)\n        # 4. 按分数排序，返回 top-K\n        return sorted(ranked, key=lambda m: -m[\"recall_score\"])[:self.recall_limit]",
+                "caption": "记忆检索：基于 token 重叠的相关性评分"
+              }
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# consolidate_task：公开方法，实现核心业务逻辑\ndef consolidate_task(self, tenant_id, repository, task_id, summary):\n    \"\"\"任务完成后：归档摘要 → 释放 Working Memory\"\"\"\n    archived = self.remember(\n        tenant_id, repository, \"episodic\", \"task_summary\",\n        \"Review task %s completed: %s\" % (task_id, json.dumps(summary)),\n        metadata={\"summary\": summary}, task_id=task_id,\n        agent=\"agent-runtime\", importance=0.65,\n    )\n    self.forget_working(task_id)  # 释放临时工作记忆\n    return archived\n\n# remember_finding：公开方法，实现核心业务逻辑\ndef remember_finding(self, tenant_id, repository, task_id, finding, approved, reasons):\n    \"\"\"每个 finding 的裁决结果归档为 Episodic Memory\"\"\"\n    importance = 0.8 if approved else 0.45  # 被批准的 finding 更重要\n    return self.remember(tenant_id, repository, \"episodic\", \"finding_%s\" % decision, ...)\n\n# remember_feedback：公开方法，实现核心业务逻辑\ndef remember_feedback(self, tenant_id, repository, task_id, category, finding, note):\n    \"\"\"用户反馈归档为 Semantic Memory（长期学习）\"\"\"\n    importance = 0.95 if category in {\"false_positive\", \"missed_issue\"} else 0.7\n    return self.remember(tenant_id, repository, \"semantic\", \"review_feedback\", ...)",
+                "caption": "记忆生命周期：Working → Episodic 归档 → Semantic 学习"
+              }
+            }
+          ]
+        },
+        {
+          "title": "案例实战：PR #42 的上下文组装与记忆检索",
+          "anchor": "practice-context-case-study",
+          "groupTitle": "上下文与记忆模块",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 8,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "当 MultiAgentCoordinator 的 LLM Specialist 审查 PR #42 时，ContextManager.compose() 为模型组装了以下上下文（按优先级排序，总预算 12000 tokens）："
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "text",
+                "content": "# ===== ContextManager.compose() 为 LLM 模型组装的完整上下文 =====\n# 总预算 12000 tokens，按优先级从高到低依次填充\n# 超过预算的内容会被丢弃（低优先级的 Observation、反馈、记忆先被裁剪）\nContextManager.compose(task_id, parsed, findings, ...) 的输出：\n\n# --- 优先级 1：系统提示词（必须保留，~500 tokens） ---\n# 告诉 LLM 它的角色和输出格式要求\n优先级 1 — 系统提示词（~500 tokens）\n  \"Review the unified diff. Return JSON findings with severity, fix and test.\"\n\n# --- 优先级 2：工具 Schema（必须保留，~800 tokens） ---\n# 告诉 LLM 它可以在 ReAct 循环中调用哪些工具\n优先级 2 — 工具 Schema（~800 tokens）\n  search_diff, changed_line, list_changed_files, recall_memory 的 JSON Schema\n  # search_diff: 在 diff 中搜索文本模式\n  # changed_line: 读取指定新增行的内容\n  # list_changed_files: 列出所有变更文件路径\n  # recall_memory: 回忆相关历史经验\n\n# --- 优先级 3：Critic 反馈（首轮审查时为空） ---\n# 如果是修订轮次，这里会包含上一轮 Critic 的质疑意见\n优先级 3 — Critic 反馈（本轮无，因为这是首轮审查）\n\n# --- 优先级 4：历史记忆（从 MemoryManager 检索，~600 tokens） ---\n# 通过 recall() 方法检索与当前任务相关的历史经验\n# 评分算法：coverage*0.55 + specificity*0.15 + importance*0.25 + 0.05/(index+1)\n优先级 4 — 历史记忆（~600 tokens）\n  MemoryManager.recall(\"acme/api-service\", \"deploy\") 返回:\n  - Episodic: \"上次 acme/api-service PR#38 发现硬编码密钥（已修复）\"  # 情景记忆：具体任务经验\n  - Semantic: \"该仓库偏好 os.environ 方式管理密钥\"  # 语义记忆：通用经验总结\n\n# --- 优先级 5：最新 Observation（上一轮工具调用结果） ---\n# AgentLoop 中工具执行的结果，按最新记录优先保留\n优先级 5 — 最新 Observation（上一轮工具调用结果）\n\n# --- 优先级 6：Diff（风险评分压缩后，~8000 tokens） ---\n# ContextManager 对每个 hunk 进行风险评分，高分 hunk 优先保留\n# 评分公式：风险词命中*2.0 + 新增行密度*0.25 + 敏感路径加分*6.0\n优先级 6 — Diff（风险评分压缩后，~8000 tokens）\n  ContextManager 对 PR #42 的 14 行新增进行风险评分:\n  - deploy.py:4  API_KEY=\"sk-prod-...\"  → score=0.92（包含 \"key\", \"secret\" 模式）→ 保留  # 高风险：硬编码密钥\n  - deploy.py:5  DB_PASSWORD=os.environ → score=0.15（安全模式）→ 可能被压缩  # 低风险：环境变量访问\n  - deploy.py:10 shell=True             → score=0.85（包含 \"shell\", \"subprocess\"）→ 保留  # 高风险：命令注入\n  - deploy.py:9  print(...)             → score=0.30（低风险）→ 保留但降低优先级  # 低优先级：调试输出\n  - deploy.py:13 except Exception:      → score=0.65（可靠性风险）→ 保留  # 中风险：宽泛异常捕获\n\n# --- 优先级 7：预留 tokens（给模型输出留空间） ---\n# 2500 tokens 预留给模型生成 findings 的响应空间\n优先级 7 — 保留 tokens（2500 tokens 预留给模型输出）\n\n# ===== 总计: ~11900 tokens（未超过 12000 预算） =====\n# 如果 diff 更大（如 50000 tokens），ContextManager 会激进压缩低分 hunk\n# 但安全评分高的 hunk（如 API_KEY、shell=True）永远不会被压缩掉",
+                "caption": "PR #42 的上下文组装：7 项内容按优先级排列，风险评分决定 Diff 保留"
+              }
+            },
+            {
+              "type": "text",
+              "text": "审查完成后，MemoryManager.consolidate_task() 将本次审查的关键信息归档：(1) 将「acme/api-service PR#42 发现 5 个问题」归档为 Episodic Memory（保留 24 小时）；(2) 释放本次任务的 Working Memory；(3) 如果用户标记了误报，将反馈归档为 Semantic Memory，供未来 recall 使用。→ 这些记忆在下次审查同一仓库时会被检索出来（如上面优先级 4 所示）。"
+            }
+          ]
+        },
+        {
+          "title": "模块总结",
+          "anchor": "practice-context-summary",
+          "groupTitle": "上下文与记忆模块",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 5,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "上下文与记忆模块的设计原则：(1) 预算硬限制——ContextManager 保证上下文永远不超过 max_tokens，超出时按风险评分裁剪；(2) 风险优先——安全评分高的 hunk 不会被压缩掉；(3) 分层存储——Working 短期、Episodic 中期、Semantic 长期，各有不同的 TTL 和检索策略；(4) 任务归档——任务完成后自动将摘要归档为 Episodic Memory，释放 Working Memory，避免内存泄漏。→ 延伸阅读：ContextManager 在 MultiAgentCoordinator 中的使用详见 08-多Agent 教程；记忆检索如何影响 LLM Agent 的审查行为详见 06-审查引擎教程。"
+            },
+            {
+              "type": "text",
+              "text": "记忆系统保存了历史审查经验。这些经验如何驱动系统自我改进？下一章的进化引擎给出答案——误报和漏报反馈如何自动生成更好的提示词版本。"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,622 @@
+{
+  "chapters": [
+    {
+      "id": "tech-stack",
+      "title": "技术栈总览",
+      "sections": [
+        {
+          "title": "技术栈全景：EvoAgent 用了什么",
+          "anchor": "techstack-overview",
+          "groupTitle": "技术栈总览",
+          "difficulty": "beginner",
+          "estimatedMinutes": 8,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "EvoAgent 的依赖策略非常克制：**核心运行只需要 Python 3.11 标准库**，生产模式额外只需 5 个第三方包。没有 Flask、FastAPI、Django 等 Web 框架，没有 openai SDK，没有 SQLAlchemy ORM——所有行为都直接写在标准库代码中，没有「框架魔法」。\n\n这种设计的好处是：(1) 代码行为完全透明，每行都能看懂；(2) 无版本冲突风险，依赖极其稳定；(3) Docker 镜像极小（约 150MB）；(4) 面试时可以清楚解释每个技术选型的原因。"
+            },
+            {
+              "type": "table",
+              "table": {
+                "headers": [
+                  "层次",
+                  "技术",
+                  "版本",
+                  "用途",
+                  "为什么选它"
+                ],
+                "rows": [
+                  [
+                    "语言",
+                    "Python",
+                    "3.11",
+                    "主语言",
+                    "类型提示成熟、标准库丰富、LLM 生态最好"
+                  ],
+                  [
+                    "Web 服务",
+                    "http.server (标准库)",
+                    "—",
+                    "HTTP API + 静态文件",
+                    "零依赖、行为透明、足够应对审查场景的 QPS"
+                  ],
+                  [
+                    "持久化（开发）",
+                    "SQLite",
+                    "—",
+                    "零配置本地存储",
+                    "无需安装数据库，开发/测试即开即用"
+                  ],
+                  [
+                    "持久化（生产）",
+                    "PostgreSQL + psycopg3",
+                    "16 / ≥3.1",
+                    "生产级关系数据库",
+                    "JSONB 支持、事务安全、生产环境标配"
+                  ],
+                  [
+                    "消息队列（生产）",
+                    "Redis Streams",
+                    "≥5",
+                    "异步任务队列",
+                    "Consumer Group 支持 ACK/重试/死信，比简单 list 更可靠"
+                  ],
+                  [
+                    "消息队列（开发）",
+                    "内存队列 (标准库)",
+                    "—",
+                    "开发模式任务调度",
+                    "collections.deque，无需安装 Redis"
+                  ],
+                  [
+                    "LLM 接入",
+                    "urllib.request",
+                    "—",
+                    "HTTP 调用 LLM API",
+                    "直接用标准库发 HTTP，不依赖 openai SDK"
+                  ],
+                  [
+                    "认证",
+                    "PyJWT + PBKDF2",
+                    "≥2.8",
+                    "JWT 签名 + 密码哈希",
+                    "GitHub App 需要 JWT；PBKDF2 是标准库内置的安全哈希"
+                  ],
+                  [
+                    "可观测性",
+                    "OpenTelemetry SDK",
+                    "≥1.24",
+                    "分布式追踪 + 指标",
+                    "厂商中立的标准，支持 OTLP 导出到多种后端"
+                  ],
+                  [
+                    "指标导出",
+                    "Prometheus 格式",
+                    "—",
+                    "/metrics 端点",
+                    "监控生态事实标准，Grafana 直接对接"
+                  ],
+                  [
+                    "部署",
+                    "Docker Compose",
+                    "—",
+                    "三容器编排",
+                    "PostgreSQL + Redis + App 一键启动"
+                  ],
+                  [
+                    "前端",
+                    "HTML + CSS + JS",
+                    "—",
+                    "教程网站 + Web UI",
+                    "零框架依赖，highlight.js + mermaid.js 渲染"
+                  ]
+                ]
+              }
+            },
+            {
+              "type": "text",
+              "text": "上表中的「为什么选它」是面试高频问题。下面按层次逐一展开。\n\n**术语速查**：表中出现了一些缩写——**QPS**（Queries Per Second，每秒查询数，衡量系统吞吐量的指标）、**SDK**（Software Development Kit，软件开发工具包，封装了 API 调用的库，让开发者不用自己处理 HTTP 请求）、**CDN**（Content Delivery Network，内容分发网络，在全球部署缓存服务器让用户从最近节点加载资源）、**YAML**（一种人类可读的数据序列化格式，常用于配置文件，用缩进表示层级关系）、**OTLP**（OpenTelemetry Protocol，OpenTelemetry 的传输协议，定义了如何将 Trace/Metrics 数据从应用传输到后端）。"
+            }
+          ]
+        },
+        {
+          "title": "语言与运行时：为什么是 Python 3.11 标准库",
+          "anchor": "techstack-python",
+          "groupTitle": "技术栈总览",
+          "difficulty": "beginner",
+          "estimatedMinutes": 6,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "Python 3.11 是当前 AI/LLM 生态最成熟的语言版本。选择标准库优先的策略意味着：项目不依赖任何 Web 框架（Flask/FastAPI/Django），HTTP 服务直接使用 `http.server.ThreadingHTTPServer`；LLM 调用直接使用 `urllib.request` 发送 HTTP POST 请求，不使用 `openai` SDK。\n\n**什么是「标准库优先」？** 标准库是 Python 安装后自带的模块集合，不需要额外 `pip install`。比如 `http.server` 可以启动 HTTP 服务器，`json` 可以序列化数据，`sqlite3` 可以操作数据库，`hashlib` 可以做哈希计算。项目只在必须时才引入第三方包（如 PostgreSQL 驱动、Redis 客户端）。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# 标准库直接启动 HTTP 服务器（api.py 简化版）\n# 导入 http.server 模块，提供必要的工具和类型定义\nfrom http.server import ThreadingHTTPServer, BaseHTTPRequestHandler\nimport json\n\n# APIHandler：核心类，封装了系统的关键行为和状态\nclass APIHandler(BaseHTTPRequestHandler):\n    # do_GET：公开方法，实现核心业务逻辑\n    def do_GET(self):\n        if self.path == '/api/health':\n            body = json.dumps({\"status\": \"ok\"}).encode()\n            self.send_response(200)\n            self.send_header('Content-Type', 'application/json')\n            self.end_headers()\n            self.wfile.write(body)\n\n# 一行启动多线程 HTTP 服务器\nserver = ThreadingHTTPServer(('0.0.0.0', 8080), APIHandler)\nserver.serve_forever()",
+                "caption": "标准库 HTTP 服务器：无需 Flask/FastAPI，行为完全透明"
+              }
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# 标准库直接调用 LLM API（reviewer.py 简化版）\n# 导入 urllib.request 模块，提供必要的工具和类型定义\nimport urllib.request\nimport json\n\n# call_llm：公开方法，实现核心业务逻辑\ndef call_llm(base_url: str, api_key: str, model: str, messages: list) -> str:\n    \"\"\"直接用 urllib 调用 OpenAI 兼容的 /chat/completions 接口\"\"\"\n    payload = json.dumps({\n        \"model\": model,\n        \"messages\": messages,\n        \"temperature\": 0.1\n    }).encode()\n    \n    req = urllib.request.Request(\n        f\"{base_url}/chat/completions\",\n        data=payload,\n        headers={\n            \"Content-Type\": \"application/json\",\n            \"Authorization\": f\"Bearer {api_key}\"\n        }\n    )\n    with urllib.request.urlopen(req, timeout=120) as resp:\n        result = json.loads(resp.read())\n    return result[\"choices\"][0][\"message\"][\"content\"]",
+                "caption": "urllib 调用 LLM：不依赖 openai SDK，行为完全可控"
+              }
+            },
+            {
+              "type": "text",
+              "text": "**ThreadingHTTPServer vs Flask/FastAPI**：ThreadingHTTPServer 是 Python 3.7+ 内置的多线程 HTTP 服务器，每个请求在独立线程中处理。对于 PR 审查场景（QPS 通常 < 10），它完全够用，且不需要理解框架的路由装饰器、中间件链、依赖注入等抽象。代价是需要手动处理路由分发（项目用 `if/elif` 链实现）和请求解析（手动读 `self.rfile`）。"
+            }
+          ]
+        },
+        {
+          "title": "持久化层：SQLite 与 PostgreSQL 双模切换",
+          "anchor": "techstack-persistence",
+          "groupTitle": "技术栈总览",
+          "difficulty": "beginner",
+          "estimatedMinutes": 5,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "持久化是指将数据保存到磁盘（数据库）的过程。EvoAgent 实现了**双模持久化**：开发环境用 SQLite（零配置），生产环境用 PostgreSQL（高可靠），两者共享同一套接口（`store.py` 中定义的抽象基类）。\n\n> **代码详解**：双模持久化的完整代码实现（TaskStore 抽象基类、SQLiteTaskStore、PostgresTaskStore）已在 [09-持久化](./tutorial/index.html?chapter=persistence) 教程中详细讲解。这里只总结选型决策。"
+            },
+            {
+              "type": "text",
+              "text": "**选型决策速查**：\n- **开发模式**：SQLite + 标准库 `sqlite3` → 零配置，`.db` 文件级存储，适合单机开发测试\n- **生产模式**：PostgreSQL + psycopg3 → 并发写入（MVCC，即多版本并发控制）、JSONB 原生支持、完整 ACID 事务\n- **为什么不用 ORM**：直接写 SQL 保证每条查询透明可见，无框架魔法，易调试\n- **切换方式**：设置 `EVOAGENT_DATABASE_URL` 环境变量即可，代码零修改\n\n**psycopg3**（`psycopg[binary]>=3.1`）是 psycopg2 的继任者，支持异步、连接池和原生类型转换。**为什么不用 SQLAlchemy？** ORM 会隐藏实际执行的 SQL，增加调试难度且引入大量依赖；项目选择直接写 SQL，让每条查询都透明可见。"
+            },
+            {
+              "type": "table",
+              "table": {
+                "headers": [
+                  "特性",
+                  "SQLite",
+                  "PostgreSQL"
+                ],
+                "rows": [
+                  [
+                    "安装",
+                    "无需安装（标准库）",
+                    "需要独立服务或 Docker"
+                  ],
+                  [
+                    "数据位置",
+                    "本地 .db 文件",
+                    "服务器端数据库"
+                  ],
+                  [
+                    "并发写入",
+                    "单写者锁",
+                    "多进程并发（MVCC）"
+                  ],
+                  [
+                    "JSONB 支持",
+                    "无（存为 TEXT）",
+                    "原生 JSONB 类型 + 索引"
+                  ],
+                  [
+                    "事务",
+                    "基础事务",
+                    "完整 ACID + 隔离级别"
+                  ],
+                  [
+                    "适用场景",
+                    "开发、测试、单机部署",
+                    "生产环境、多 Worker 部署"
+                  ],
+                  [
+                    "切换方式",
+                    "不设置 DATABASE_URL 环境变量",
+                    "设置 EVOAGENT_DATABASE_URL"
+                  ]
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "title": "消息队列：Redis Streams 与内存队列",
+          "anchor": "techstack-queue",
+          "groupTitle": "技术栈总览",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 8,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "消息队列是异步任务调度的基础设施。当 GitHub Webhook 收到 PR 审查请求时，任务不会立即执行，而是先放入队列。后台 Worker 从队列中取出任务、执行审查、确认完成。这种「生产者-消费者」模式解耦了请求接收和任务执行。\n\n**什么是 Redis Streams？** Redis Streams 是 Redis 5.0 引入的数据结构，专门用于消息队列。它不像简单的 Redis List（只能 LPUSH/BRPOP），而是支持：(1) **Consumer Group**（消费者组）——多个 Worker 组成一个组，每条消息只被组内一个 Worker 处理；(2) **ACK 机制**——Worker 处理完消息后发送确认，未确认的消息可以被重新分配；(3) **死信队列**——反复失败的消息自动进入死信队列，避免无限重试。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# Redis Streams 核心操作（task_queue.py 简化版）\n# 导入 redis 模块，提供必要的工具和类型定义\nimport redis\n\n# RedisTaskQueue：核心类，封装了系统的关键行为和状态\nclass RedisTaskQueue:\n    def __init__(self, redis_url: str, stream: str = \"evoagent:tasks\"):\n        self.r = redis.from_url(redis_url)\n        self.stream = stream\n    \n    # enqueue：公开方法，实现核心业务逻辑\n    def enqueue(self, task: dict) -> str:\n        \"\"\"生产者：将任务添加到 Stream\"\"\"\n        msg_id = self.r.xadd(self.stream, {\"task\": json.dumps(task)})\n        return msg_id  # 返回消息 ID，如 '1712345678901-0'\n    \n    # dequeue：公开方法，实现核心业务逻辑\n    def dequeue(self, group: str, consumer: str, timeout: int = 5000):\n        \"\"\"消费者：从 Stream 中取出任务（阻塞等待）\"\"\"\n        # XREADGROUP：Consumer Group 读取模式\n        messages = self.r.xreadgroup(\n            groupname=group, consumername=consumer,\n            streams={self.stream: \">\"},  # \">\" 表示只读新消息\n            count=1, block=timeout\n        )\n        if messages:\n            msg_id, fields = messages[0][1][0]\n            return msg_id, json.loads(fields[b\"task\"])\n        return None, None\n    \n    # acknowledge：公开方法，实现核心业务逻辑\n    def acknowledge(self, msg_id: str, group: str):\n        \"\"\"确认消息已处理（告诉 Redis 可以安全删除）\"\"\"\n        self.r.xack(self.stream, group, msg_id)",
+                "caption": "Redis Streams 三步曲：XADD（入队）→ XREADGROUP（消费）→ XACK（确认）"
+              }
+            },
+            {
+              "type": "text",
+              "text": "**开发模式**下，项目使用 `collections.deque`（双端队列）作为内存队列。它不需要安装 Redis，但进程重启后队列中的任务会丢失。生产模式必须使用 Redis Streams。"
+            },
+            {
+              "type": "table",
+              "table": {
+                "headers": [
+                  "特性",
+                  "内存队列 (deque)",
+                  "Redis Streams"
+                ],
+                "rows": [
+                  [
+                    "安装",
+                    "无需安装",
+                    "需要 Redis 服务"
+                  ],
+                  [
+                    "持久化",
+                    "无（重启丢失）",
+                    "有（AOF/RDB 持久化）"
+                  ],
+                  [
+                    "Consumer Group",
+                    "无",
+                    "原生支持"
+                  ],
+                  [
+                    "ACK/重试",
+                    "无",
+                    "XACK + XAUTOCLAIM"
+                  ],
+                  [
+                    "死信队列",
+                    "无",
+                    "自动进入死信"
+                  ],
+                  [
+                    "多 Worker",
+                    "不支持",
+                    "支持多 Worker 竞争消费"
+                  ],
+                  [
+                    "适用场景",
+                    "开发调试",
+                    "生产部署"
+                  ]
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "title": "认证与安全：JWT + PBKDF2 + GitHub App",
+          "anchor": "techstack-auth",
+          "groupTitle": "技术栈总览",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 6,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "EvoAgent 的认证体系需要处理三种场景：(1) **Webhook 验证**——确认请求确实来自 GitHub；(2) **API 认证**——保护管理接口不被未授权访问；(3) **GitHub App 签名**——以应用身份调用 GitHub API 发表评论。\n\n**什么是 JWT？** JWT（JSON Web Token）是一种无状态的认证令牌。服务器用密钥签名生成 Token，客户端携带 Token 访问 API，服务器验证签名即可确认身份——不需要查数据库。适合分布式系统。\n\n**什么是 PBKDF2？** PBKDF2（Password-Based Key Derivation Function 2）是一种密码哈希算法。它通过大量迭代（项目使用 310,000 次）将密码转换为哈希值，使暴力破解变得极其缓慢。Python 标准库 `hashlib.pbkdf2_hmac()` 直接支持。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# 三种认证机制（auth.py 简化版）\n# 导入 jwt 模块，提供必要的工具和类型定义\nimport jwt          # PyJWT 库\n# 导入 hashlib 模块，提供必要的工具和类型定义\nimport hashlib      # 标准库\n# 导入 hmac 模块，提供必要的工具和类型定义\nimport hmac         # 标准库\n# 导入 time 模块，提供必要的工具和类型定义\nimport time\n\n# 1. GitHub Webhook 签名验证\n# GitHub 在请求头中附带 HMAC-SHA256 签名，我们用共享密钥验证\n# verify_webhook_signature：公开方法，实现核心业务逻辑\ndef verify_webhook_signature(payload: bytes, signature: str, secret: str) -> bool:\n    expected = hmac.new(secret.encode(), payload, hashlib.sha256).hexdigest()\n    return hmac.compare_digest(f\"sha256={expected}\", signature)\n\n# 2. JWT Token 签发与验证（API 认证）\n# create_token：公开方法，实现核心业务逻辑\ndef create_token(user_id: str, secret: str, ttl: int = 3600) -> str:\n    return jwt.encode(\n        {\"sub\": user_id, \"exp\": time.time() + ttl},\n        secret, algorithm=\"HS256\"\n    )\n\n# verify_token：公开方法，实现核心业务逻辑\ndef verify_token(token: str, secret: str) -> dict:\n    return jwt.decode(token, secret, algorithms=[\"HS256\"])\n\n# 3. GitHub App JWT（以应用身份调用 GitHub API）\n# create_github_app_jwt：公开方法，实现核心业务逻辑\ndef create_github_app_jwt(app_id: str, private_key: str) -> str:\n    now = int(time.time())\n    return jwt.encode(\n        {\"iat\": now - 60, \"exp\": now + 600, \"iss\": app_id},\n        private_key, algorithm=\"RS256\"\n    )\n\n# 4. 密码哈希（PBKDF2，标准库）\n# hash_password：公开方法，实现核心业务逻辑\ndef hash_password(password: str) -> str:\n    salt = os.urandom(16)  # 随机盐值\n    dk = hashlib.pbkdf2_hmac('sha256', password.encode(), salt, 310_000)\n    return salt.hex() + ':' + dk.hex()  # 盐值 + 哈希值",
+                "caption": "四种认证机制：Webhook HMAC、JWT Token、GitHub App RS256、PBKDF2 密码哈希"
+              }
+            },
+            {
+              "type": "text",
+              "text": "**为什么用 PyJWT 而不是标准库？** Python 标准库没有 JWT 编解码功能。PyJWT 是最轻量的 JWT 库（零传递依赖），项目只用了 `jwt.encode()` 和 `jwt.decode()` 两个函数。\n\n**什么是 RSA 和 RS256？** RSA 是一种非对称加密算法——有两把密钥：公钥（公开）和私钥（保密）。用私钥签名的数据，任何人都能用公钥验证来源；反过来，用公钥加密的数据，只有私钥持有者能解密。**RS256** 是用 SHA-256 做哈希的 RSA 签名方案。与 HS256（对称，同一个密钥既签名又验证）不同，RS256 用不同密钥——GitHub App 场景下，私钥在你手中，公钥在 GitHub 手中，这样 GitHub 能验证请求确实来自你的应用，而不需要把密钥传给 GitHub。\n\n**为什么密码用 PBKDF2 而不是 bcrypt？** bcrypt 需要额外安装 `bcrypt` 包，而 PBKDF2 在标准库 `hashlib` 中。310,000 次迭代的 PBKDF2-SHA256 安全性与 bcrypt 相当，且零依赖。"
+            }
+          ]
+        },
+        {
+          "title": "LLM 接入：OpenAI 兼容协议",
+          "anchor": "techstack-llm",
+          "groupTitle": "技术栈总览",
+          "difficulty": "beginner",
+          "estimatedMinutes": 5,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "EvoAgent 通过 **OpenAI Chat Completions 兼容协议**接入大语言模型。这意味着无论使用 OpenAI、DeepSeek、通义千问还是本地部署的模型，只要 API 兼容 OpenAI 的 `/chat/completions` 接口格式，就能直接接入——不需要修改任何代码。\n\n**什么是「兼容协议」？** OpenAI 定义了 LLM 调用的 HTTP 接口标准：POST 请求发送到 `/v1/chat/completions`，请求体包含 `model` 和 `messages` 字段，响应体包含 `choices[0].message.content`。几乎所有 LLM 提供商都支持这个格式。项目用 `urllib.request` 直接发送 HTTP 请求，不依赖 `openai` Python SDK。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# LLM 配置路由（config.py 简化版）\n# resolved_llm：公开方法，实现核心业务逻辑\ndef resolved_llm(provider: str) -> dict:\n    \"\"\"将 provider 名称解析为统一的 {base_url, api_key, model, headers}\"\"\"\n    if provider == \"local\":\n        return {\n            \"base_url\": \"http://localhost:11434/v1\",  # Ollama 本地模型\n            \"api_key\": \"not-needed\",\n            \"model\": os.getenv(\"LOCAL_MODEL\", \"qwen2.5:7b\"),\n            \"headers\": {}\n        }\n    elif provider == \"deepseek\":\n        return {\n            \"base_url\": \"https://api.deepseek.com/v1\",\n            \"api_key\": os.environ[\"DEEPSEEK_API_KEY\"],\n            \"model\": os.getenv(\"DEEPSEEK_MODEL\", \"deepseek-chat\"),\n            \"headers\": {}\n        }\n    elif provider == \"custom\":\n        return {\n            \"base_url\": os.environ[\"CUSTOM_LLM_URL\"],\n            \"api_key\": os.environ.get(\"CUSTOM_LLM_KEY\", \"\"),\n            \"model\": os.getenv(\"CUSTOM_LLM_MODEL\", \"default\"),\n            \"headers\": json.loads(os.getenv(\"CUSTOM_LLM_HEADERS\", \"{}\"))\n        }\n    # 所有 provider 最终归一化为相同的四元组结构",
+                "caption": "LLM 路由：不同 provider 归一化为统一的 {base_url, api_key, model, headers}"
+              }
+            },
+            {
+              "type": "table",
+              "table": {
+                "headers": [
+                  "Provider",
+                  "Base URL",
+                  "认证方式",
+                  "说明"
+                ],
+                "rows": [
+                  [
+                    "local",
+                    "http://localhost:11434/v1",
+                    "无需认证",
+                    "Ollama 等本地模型服务"
+                  ],
+                  [
+                    "deepseek",
+                    "https://api.deepseek.com/v1",
+                    "API Key",
+                    "DeepSeek 云端 API"
+                  ],
+                  [
+                    "openrouter",
+                    "https://openrouter.ai/api/v1",
+                    "API Key",
+                    "多模型路由平台"
+                  ],
+                  [
+                    "custom",
+                    "自定义 URL",
+                    "API Key + 自定义 Headers",
+                    "任意兼容 OpenAI 协议的端点"
+                  ]
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "title": "可观测性：OpenTelemetry + Prometheus",
+          "anchor": "techstack-observability",
+          "groupTitle": "技术栈总览",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 6,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "可观测性（Observability）是指通过系统的外部输出来理解其内部状态的能力。对于 Agent 系统来说，可观测性尤为重要——你需要知道每个节点花了多少时间、LLM 调用了什么 prompt、哪个 Finding 被过滤了。\n\nOpenTelemetry 的通俗解释和代码实现已在 03b-设计模式 中详细讲解。这里从技术选型角度补充：项目选择 OpenTelemetry 而非 Datadog/New Relic 等商业方案，是因为它是开源标准、厂商无关、Python SDK 成熟度高。\n\n**Prometheus** 是一个时序数据库和监控系统。项目暴露 `/metrics` 端点，输出 Prometheus 文本格式（`evoagent_reviews_total 42`），Prometheus Server 定期抓取这些指标，Grafana 负责可视化。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# 可观测性实现（observability.py 简化版）\nfrom opentelemetry import trace\n# 导入 opentelemetry.sdk.trace 模块，提供必要的工具和类型定义\nfrom opentelemetry.sdk.trace import TracerProvider\n# 导入 opentelemetry.sdk.trace.export 模块，提供必要的工具和类型定义\nfrom opentelemetry.sdk.trace.export import BatchSpanProcessor\n# 导入 opentelemetry.exporter.otlp.proto.http.trace_exporter 模块，提供必要的工具和类型定义\nfrom opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter\n\n# 初始化 OpenTelemetry 追踪\nprovider = TracerProvider()\nprovider.add_span_processor(BatchSpanProcessor(\n    OTLPSpanExporter(endpoint=\"http://localhost:4318/v1/traces\")\n))\ntracer = provider.get_tracer(\"evoagent\")\n\n# review_with_trace：公开方法，实现核心业务逻辑\ndef review_with_trace(task_id, diff):\n    with tracer.start_as_current_span(\"review\") as span:\n        span.set_attribute(\"task.id\", task_id)\n        findings = run_review(diff)\n        span.set_attribute(\"review.findings_count\", len(findings))\n        return findings\n\n# Prometheus 指标（metrics.py）\n# MetricsRegistry：核心类，封装了系统的关键行为和状态\nclass MetricsRegistry:\n    def __init__(self):\n        self.counters = {}   # 计数器：只增不减\n        # 初始化字典 gauges，用于存储键值对数据\n        self.gauges = {}     # 仪表盘：可增可减\n        self._lock = threading.Lock()\n    \n    def inc(self, name: str, labels: dict = None):\n        \"\"\"计数器 +1（如 evoagent_reviews_total）\"\"\"\n        with self._lock:\n            self.counters[name] = self.counters.get(name, 0) + 1\n    \n    def prometheus(self) -> str:\n        \"\"\"输出 Prometheus 文本格式（/metrics 端点使用）\"\"\"\n        lines = []\n        for name, value in sorted(self.counters.items()):\n            lines.extend([\n                f\"# TYPE evoagent_{name} counter\",\n                f\"evoagent_{name} {value}\"\n            ])\n        return \"\\n\".join(lines) + \"\\n\"",
+                "caption": "双轨可观测性：OpenTelemetry 追踪 + Prometheus 指标"
+              }
+            },
+            {
+              "type": "text",
+              "text": "**为什么不用 logging 模块就够了？** Python 的 `logging` 模块只能输出文本日志，无法结构化地追踪一次请求跨越多个函数/线程的完整链路。OpenTelemetry 的 Trace 可以跨函数、跨线程记录完整的调用树，每个 Span 带有时间戳和属性标签，方便在 Jaeger 中可视化。"
+            }
+          ]
+        },
+        {
+          "title": "部署：Docker Compose 三容器编排",
+          "anchor": "techstack-deploy",
+          "groupTitle": "技术栈总览",
+          "difficulty": "beginner",
+          "estimatedMinutes": 5,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "**Docker** 是一种容器化技术——把应用和它的所有依赖（Python、系统库、配置文件）打包成一个轻量级容器，在任何机器上都能一致运行。\n\nDocker Compose 的快速启动命令在 04-快速上手 中已介绍。这里从技术选型角度展示完整的容器编排配置。\n\n**Docker Compose** 是多容器编排工具。EvoAgent 的生产部署需要三个容器协同工作：App（Python 应用）、PostgreSQL（数据库）、Redis（消息队列）。`docker-compose.yml` 一个文件定义了这三个服务及其依赖关系。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "yaml",
+                "content": "# docker-compose.yml — 三容器编排\nservices:\n  postgres:                          # 数据库服务：存储任务记录、审查结果、审计日志等\n    image: postgres:16-alpine        # 使用 Alpine Linux 版（体积小，约 5MB vs 完整版 100MB）\n    environment:\n      POSTGRES_DB: evoagent          # 数据库名称\n      POSTGRES_USER: evoagent        # 数据库用户名\n      POSTGRES_PASSWORD: evoagent-local  # 数据库密码（仅本地开发使用）\n    volumes:\n      - postgres_data:/var/lib/postgresql/data  # 数据持久化：容器重启后数据不丢失\n    healthcheck:\n      test: [\"CMD-SHELL\", \"pg_isready -U evoagent\"]  # 健康检查：确认 PostgreSQL 已就绪\n\n  redis:                             # 消息队列服务：异步任务调度的基础设施\n    image: redis:7-alpine            # 使用 Alpine 精简版\n    command: [\"redis-server\", \"--appendonly\", \"yes\"]  # AOF 持久化：每条写操作追加到日志\n    healthcheck:\n      test: [\"CMD\", \"redis-cli\", \"ping\"]  # 健康检查：redis-cli ping 返回 PONG 表示正常\n\n  evoagent:                          # 应用服务：EvoAgent 主程序\n    build: .                         # 从当前目录的 Dockerfile 构建镜像\n    ports:\n      - \"8080:8080\"                  # 将容器 8080 端口映射到本机，供外部访问 Dashboard 和 API\n    environment:\n      EVOAGENT_DATABASE_URL: postgresql://evoagent:...@postgres:5432/evoagent  # 注意主机名是 postgres（容器名），不是 localhost\n      EVOAGENT_REDIS_URL: redis://redis:6379/0  # 注意主机名是 redis（容器名），Docker 内部 DNS 自动解析\n    depends_on:                      # 启动顺序依赖：等 postgres 和 redis 健康后才启动 evoagent\n      postgres: {condition: service_healthy}  # 等待 PostgreSQL 健康检查通过\n      redis: {condition: service_healthy}",
+                "caption": "Docker Compose：三个服务 + 健康检查 + 启动依赖"
+              }
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "dockerfile",
+                "content": "# Dockerfile — 应用镜像构建（最终镜像约 150MB）\nFROM python:3.11-slim              # 基础镜像：精简版 Python 3.11（去掉了文档和测试工具）\n\nENV PYTHONDONTWRITEBYTECODE=1 \\    # 不生成 .pyc 文件，减少镜像体积\n    PYTHONUNBUFFERED=1             # 禁用输出缓冲，确保日志实时可见（方便 docker logs 调试）\n\nWORKDIR /app                       # 设置工作目录为 /app，后续 COPY 和 CMD 都相对于此目录\nCOPY requirements.txt .            # 先复制依赖文件（利用 Docker 层缓存，依赖不变时跳过安装）\nRUN pip install --no-cache-dir -r requirements.txt  # 安装 5 个依赖包，--no-cache-dir 减小镜像体积\nCOPY evoagent ./evoagent           # 复制应用核心代码\nCOPY web ./web                     # 复制前端静态文件（Dashboard）\nCOPY skills ./skills               # 复制 Skill 文件（自定义审查规则）\nEXPOSE 8080                        # 声明容器监听 8080 端口（配合 docker-compose 的 ports 映射）\nCMD [\"python\", \"-m\", \"evoagent\"]   # 容器启动命令：以模块方式运行 evoagent 包",
+                "caption": "Dockerfile：从 python:3.11-slim 构建，最终镜像约 150MB"
+              }
+            },
+            {
+              "type": "text",
+              "text": "**为什么用 Alpine 版镜像？** `postgres:16-alpine` 和 `redis:7-alpine` 使用 Alpine Linux（约 5MB）代替完整版 Linux（约 100MB），显著减小镜像体积。`python:3.11-slim` 是 Python 的精简版，去掉了文档、测试工具等非必要组件。"
+            }
+          ]
+        },
+        {
+          "title": "GitHub 集成：Webhook + App 签名",
+          "anchor": "techstack-github",
+          "groupTitle": "技术栈总览",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 5,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "EvoAgent 作为 **GitHub App** 与 GitHub 集成。GitHub App 是一种官方机制，允许第三方应用接收 Webhook 事件、以应用身份发表评论。\n\n**Webhook** 是 GitHub 的推送通知机制：当 PR 被创建或更新时，GitHub 向你配置的 URL 发送 HTTP POST 请求，请求体包含 PR 的完整 diff。你的服务收到请求后，将审查任务放入队列异步处理。\n\n**GitHub App 签名**：每次调用 GitHub API（如发表评论），需要用 RSA 私钥签发 JWT 作为身份凭证。GitHub 验证签名后，允许应用以 Bot 身份操作仓库。"
+            },
+            {
+              "type": "diagram",
+              "diagram": {
+                "language": "mermaid",
+                "content": "sequenceDiagram\n    participant GitHub\n    participant EvoAgent as EvoAgent API\n    participant Queue as Redis 队列\n    participant Worker as 后台 Worker\n\n    GitHub->>EvoAgent: POST /webhook/github<br>(PR #42 创建/更新事件)\n    Note over GitHub,EvoAgent: 请求头包含 X-Hub-Signature-256<br>(HMAC-SHA256 签名)\n    EvoAgent->>EvoAgent: 验证 HMAC 签名 ✓\n    EvoAgent->>Queue: XADD evoagent:tasks<br>(入队审查任务)\n    EvoAgent-->>GitHub: HTTP 200 OK<br>(快速响应，不阻塞)\n    \n    Queue->>Worker: XREADGROUP<br>(Worker 取出任务)\n    Worker->>Worker: 执行审查流程<br>(解析 diff → 多 Agent 审查 → 生成报告)\n    Worker->>GitHub: POST /repos/.../pulls/42/comments<br>(发表审查评论)\n    Note over Worker,GitHub: 使用 GitHub App JWT 认证<br>(RS256 签名)",
+                "caption": "GitHub 集成完整流程：Webhook 接收 → 队列 → 审查 → 评论"
+              }
+            },
+            {
+              "type": "text",
+              "text": "整个集成过程只使用了三个外部库：`PyJWT`（JWT 签名）、`urllib.request`（HTTP 调用 GitHub API）和 `hmac`/`hashlib`（标准库 HMAC 验证）。没有 `PyGithub`、`requests` 等 GitHub SDK。"
+            }
+          ]
+        },
+        {
+          "title": "前端技术：零框架的轻量 Web UI",
+          "anchor": "techstack-frontend",
+          "groupTitle": "技术栈总览",
+          "difficulty": "beginner",
+          "estimatedMinutes": 4,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "EvoAgent 的前端分为两部分：(1) **教程学习网站**（`tutorial/index.html`）——你正在阅读的这个页面；(2) **管理 Web UI**（`web/`）——任务管理、配置查看等。\n\n两部分都使用**纯 HTML + CSS + JavaScript**，没有 React、Vue 等前端框架。教程网站只引入了三个 CDN 库：\n- **highlight.js**：代码语法高亮\n- **marked.js**：将 Markdown 文本渲染为 HTML\n- **mermaid.js**：将文本描述渲染为流程图/类图/时序图\n\n这种设计的好处是：(1) 无需 Node.js 构建流程，打开 HTML 就能用；(2) 没有 npm 依赖树和打包工具；(3) 加载速度极快。"
+            },
+            {
+              "type": "table",
+              "table": {
+                "headers": [
+                  "组件",
+                  "技术",
+                  "文件",
+                  "说明"
+                ],
+                "rows": [
+                  [
+                    "教程网站",
+                    "HTML + CSS + JS",
+                    "tutorial/index.html",
+                    "单页应用，JSON 数据驱动"
+                  ],
+                  [
+                    "教程数据",
+                    "JSON 文件",
+                    "tutorial/*.json",
+                    "每个教程一个 JSON，manifest.json 索引"
+                  ],
+                  [
+                    "代码高亮",
+                    "highlight.js (CDN)",
+                    "—",
+                    "支持 Python/SQL/YAML/Dockerfile 等语言"
+                  ],
+                  [
+                    "图表渲染",
+                    "mermaid.js (CDN)",
+                    "—",
+                    "支持流程图、类图、时序图、甘特图"
+                  ],
+                  [
+                    "Markdown",
+                    "marked.js (CDN)",
+                    "—",
+                    "教程文本块中的 Markdown 渲染"
+                  ],
+                  [
+                    "管理 UI",
+                    "HTML + CSS + JS",
+                    "web/index.html",
+                    "任务列表、配置查看、手动触发审查"
+                  ],
+                  [
+                    "暗色模式",
+                    "CSS 变量切换",
+                    "—",
+                    "data-theme='dark' 切换 CSS 变量集"
+                  ]
+                ]
+              }
+            },
+            {
+              "type": "text",
+              "text": "教程网站的数据架构值得注意：页面本身不包含任何教程内容，所有内容都从 JSON 文件动态加载。`manifest.json` 定义了教程文件列表，`index.html` 按顺序加载并合并所有 JSON，渲染为可翻页的学习界面。这种「数据与展示分离」的设计使得教程内容可以独立更新，无需修改 HTML。"
+            }
+          ]
+        },
+        {
+          "title": "技术选型决策图：为什么这样组合",
+          "anchor": "techstack-decisions",
+          "groupTitle": "技术栈总览",
+          "difficulty": "beginner",
+          "estimatedMinutes": 5,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "每个技术选型背后都有明确的决策逻辑。下图总结了关键决策和它们的权衡："
+            },
+            {
+              "type": "diagram",
+              "diagram": {
+                "language": "mermaid",
+                "content": "graph TD\n    A[\"🎯 设计目标\"] --> B[\"代码透明<br>每行都能看懂\"]\n    A --> C[\"最小依赖<br>5 个生产包\"]\n    A --> D[\"零配置启动<br>SQLite + 内存队列\"]\n    A --> E[\"生产可靠<br>PostgreSQL + Redis\"]\n    \n    B --> F[\"❌ 不用 Flask/FastAPI<br>✅ 用 http.server 标准库\"]\n    B --> G[\"❌ 不用 openai SDK<br>✅ 用 urllib.request\"]\n    B --> H[\"❌ 不用 SQLAlchemy<br>✅ 直接写 SQL\"]\n    \n    C --> I[\"❌ 不用 bcrypt<br>✅ 用 hashlib.pbkdf2_hmac\"]\n    C --> J[\"❌ 不用 python-dotenv<br>✅ 自己写 load_dotenv\"]\n    \n    D --> K[\"开发模式：<br>SQLite + deque 内存队列\"]\n    E --> L[\"生产模式：<br>PostgreSQL + Redis Streams\"]\n    \n    style A fill:#c2644a,color:#fff\n    style F fill:#5b8c5a,color:#fff\n    style G fill:#5b8c5a,color:#fff\n    style H fill:#5b8c5a,color:#fff\n    style I fill:#5b8c5a,color:#fff\n    style J fill:#5b8c5a,color:#fff",
+                "caption": "技术选型决策树：从设计目标到具体选择"
+              }
+            },
+            {
+              "type": "table",
+              "table": {
+                "headers": [
+                  "决策",
+                  "选择",
+                  "放弃的方案",
+                  "核心理由"
+                ],
+                "rows": [
+                  [
+                    "Web 框架",
+                    "http.server 标准库",
+                    "Flask / FastAPI",
+                    "零依赖、行为透明、QPS 足够"
+                  ],
+                  [
+                    "LLM SDK",
+                    "urllib.request",
+                    "openai Python SDK",
+                    "避免 SDK 版本锁定和隐藏行为"
+                  ],
+                  [
+                    "数据库 ORM",
+                    "直接写 SQL",
+                    "SQLAlchemy / Tortoise",
+                    "SQL 完全可见、无魔法、易调试"
+                  ],
+                  [
+                    "密码哈希",
+                    "PBKDF2 (标准库)",
+                    "bcrypt / argon2",
+                    "零额外依赖、安全性相当"
+                  ],
+                  [
+                    "环境变量",
+                    "自定义 load_dotenv",
+                    "python-dotenv",
+                    "系统环境变量优先，Docker 友好"
+                  ],
+                  [
+                    "消息队列",
+                    "Redis Streams",
+                    "RabbitMQ / Kafka",
+                    "轻量、Consumer Group 足够、运维简单"
+                  ],
+                  [
+                    "追踪",
+                    "OpenTelemetry",
+                    "Jaeger Client / Zipkin",
+                    "厂商中立标准、生态最广"
+                  ],
+                  [
+                    "部署",
+                    "Docker Compose",
+                    "Kubernetes",
+                    "三容器不需要 K8s 的复杂度"
+                  ]
+                ]
+              }
+            },
+            {
+              "type": "text",
+              "text": "这些决策的共同主题是**「够用就好，保持透明」**。项目没有追求技术先进性或功能完备性，而是选择了最容易理解、最少依赖、最透明的方案。这使得面试时可以清楚解释每个选型的原因，也使得代码审查时不会被框架行为 surprises。"
+            },
+            {
+              "type": "text",
+              "text": "至此，EvoAgent 的完整技术栈已经介绍完毕。从 diff 解析到多 Agent 协作，从持久化到进化引擎，每个技术选择都遵循最小依赖、双模兼容、可观测的原则。回顾整个教程，你已经从零开始理解了整个系统——现在可以动手实践了。"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

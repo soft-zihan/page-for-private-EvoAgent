@@ -1,0 +1,274 @@
+{
+  "chapters": [
+    {
+      "id": "architecture",
+      "title": "架构设计",
+      "sections": [
+        {
+          "title": "系统全景架构",
+          "anchor": "arch-overview",
+          "groupTitle": "架构设计",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 15,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "EvoAgent 的架构围绕一个核心流程展开：接收 diff → 解析 → 多Agent协作审查 → 生成报告。整个系统可以分成 6 层：接入层、服务编排层、运行时层、审查层、持久化层和基础设施层。每一层都有明确的边界和职责，层间通过接口解耦。"
+            },
+            {
+              "type": "text",
+              "text": "**什么是「层」和「接口解耦」？** 分层就像公司的部门划分——销售部（接入层）接待客户，产品部（服务编排层）协调需求，生产部（审查层）干活。每个部门通过「接口」（标准化的沟通流程，如提交工单）与其他部门协作，不需要知道对方内部的运作方式。「解耦」就是各部门独立运作——换一个生产部供应商不影响销售部的工作。这样修改某一层的实现时，其他层不需要改动。"
+            },
+            {
+              "type": "diagram",
+              "diagram": {
+                "language": "mermaid",
+                "content": "graph TB\n    subgraph 接入层\n        A[HTTP API<br/>api.py] --> B[GitHub Webhook<br/>github.py]\n    end\n    subgraph 服务编排层\n        C[ReviewService<br/>service.py]\n    end\n    subgraph 运行时层\n        D[ReviewHarness<br/>harness.py]\n        E[AgentRuntime<br/>runtime.py]\n        F[AgentLoop<br/>runtime.py]\n    end\n    subgraph 审查层\n        G[MultiAgentCoordinator<br/>agents.py]\n        H[Reviewer 实现<br/>reviewer.py]\n        I[Skill Registry<br/>skills.py]\n    end\n    subgraph 持久化层\n        J[TaskStore<br/>store.py / postgres_store.py]\n        K[TaskQueue<br/>task_queue.py]\n    end\n    subgraph 基础设施\n        L[ContextManager<br/>context_manager.py]\n        M[MemoryManager<br/>memory.py]\n        N[Observability<br/>observability.py]\n    end\n    A --> C\n    B --> C\n    C --> D\n    D --> E\n    E --> F\n    D --> G\n    G --> H\n    G --> I\n    C --> J\n    C --> K\n    G --> L\n    G --> M\n    D --> N",
+                "caption": "EvoAgent 六层架构图"
+              }
+            },
+            {
+              "type": "text",
+              "text": "为什么选择这种分层？关键设计决策是「运行时与审查分离」。AgentRuntime 只负责节点执行、预算控制和 checkpoint 持久化，完全不知道「审查」是什么。MultiAgentCoordinator 只负责 Agent 协作协议，不关心状态机转换。这种分离使得运行时可以被复用在其他工作流中（事实上 harness.py 和 agents.py 都使用了同一个 AgentRuntime）。"
+            }
+          ]
+        },
+        {
+          "title": "核心数据模型：系统中的关键数据结构",
+          "anchor": "arch-data-models",
+          "groupTitle": "架构设计",
+          "difficulty": "beginner",
+          "estimatedMinutes": 12,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "在深入各层实现之前，先了解系统中流转的核心数据结构。所有数据模型定义在 `evoagent/models.py`（84行）中。理解这些模型是理解整个系统的基础。"
+            },
+            {
+              "type": "text",
+              "text": "**Python 基础概念说明**：本项目的数据模型使用了 Python 的 `@dataclass` 装饰器和 `Enum` 枚举类。如果你不熟悉这些概念：\n\n- **`@dataclass`**：Python 的语法糖。在类上方加 `@dataclass`，Python 会自动生成构造函数 `__init__`、字符串表示 `__repr__` 等方法。你只需声明字段，不用手写样板代码。例如 `@dataclass class ChangedLine: path: str; line: int; content: str` 等价于手写一个包含 `__init__(self, path, line, content)` 的类。\n- **`Enum`（枚举）**：定义一组固定常量。例如 `TaskState.PENDING` 表示任务处于「待处理」状态，只能是 7 种状态之一，不能用其他值。\n- **`to_dict()` 与序列化**：`to_dict()` 将对象转换为字典（`dict`）。**序列化**是把内存中的对象变成可存储/可传输的格式（如 JSON 字符串）的过程。就像把积木作品拍照记录——照片（JSON）可以在网上传输、存到硬盘，需要时再按照片重新搭出积木（反序列化）。`to_dict()` 是序列化的第一步：先把对象变成字典，再用 `json.dumps()` 变成 JSON 字符串。"
+            },
+            {
+              "type": "diagram",
+              "diagram": {
+                "language": "mermaid",
+                "content": "classDiagram\n    class TaskState {\n        <<enumeration>>\n        PENDING\n        PLANNING\n        EXECUTING\n        REVIEWING\n        SUCCESS\n        FAILED\n        CANCELLED\n    }\n    class Severity {\n        <<enumeration>>\n        CRITICAL\n        HIGH\n        MEDIUM\n        LOW\n    }\n    class ChangedLine {\n        +str path\n        +int line\n        +str content\n    }\n    class Finding {\n        +str rule_id\n        +Severity severity\n        +str title\n        +str explanation\n        +str path\n        +int line\n        +str evidence\n        +str fix\n        +str test\n        +float confidence\n        +to_dict() dict\n    }\n    class ReviewReport {\n        +str repository\n        +int pull_request\n        +str summary\n        +str risk\n        +List~Finding~ findings\n        +List~str~ files_reviewed\n        +str reviewer\n        +Dict collaboration\n        +to_dict() dict\n    }\n    class TraceEvent {\n        +int step\n        +TaskState state\n        +str message\n        +str created_at\n        +to_dict() dict\n    }\n    ReviewReport \"1\" *-- \"0..*\" Finding : contains\n    Finding \"1\" --> \"1\" Severity : has\n    TraceEvent \"1\" --> \"1\" TaskState : records",
+                "caption": "核心数据模型关系图：6 个类/枚举及其关系"
+              }
+            },
+            {
+              "type": "text",
+              "text": "上图展示了 6 个核心数据模型及其关系：\n\n- **TaskState**（枚举）：任务的 7 种状态。任务从 PENDING 开始，经过 PLANNING → EXECUTING → REVIEWING，最终到达 SUCCESS 或 FAILED。这就是「状态机」——一种只能按固定规则转换状态的设计模式，就像棋盘上的棋子只能按规则移动。\n- **Severity**（枚举）：Finding 的 4 种严重级别（CRITICAL > HIGH > MEDIUM > LOW），决定报告中 Finding 的排序和图标颜色。\n- **ChangedLine**：解析后的代码变更行，包含文件路径（path）、行号（line）和内容（content）。这是 diff 解析器的输出，也是所有审查器的输入。\n- **Finding**：审查器发现的一个问题。包含规则 ID、严重级别、标题、解释、证据代码、修复建议、测试建议和置信度。一个 ReviewReport 包含多个 Finding。\n- **ReviewReport**：一次审查的完整报告。聚合了所有 Finding，并包含仓库名、PR 编号、风险等级、审查器名称等元信息。\n- **TraceEvent**：任务状态变化的轨迹记录。每当事件状态转换时（如 PENDING → PLANNING），系统创建一条 TraceEvent，用于事后审计和调试。"
+            },
+            {
+              "type": "text",
+              "text": "**数据流转示例**：以 PR #42 为例，数据在系统中的流转路径是：\n\n1. **输入**：unified diff 文本（原始文本格式）\n2. **diff_parser 输出**：`ParsedDiff(files=[\"deploy.py\"], added_lines=[ChangedLine(...), ...])` — 结构化的变更行列表\n3. **Reviewer 输出**：`[Finding(rule_id=\"SEC-HARDCODED-SECRET\", severity=HIGH, ...), ...]` — 发现的问题列表\n4. **ReviewHarness 输出**：`ReviewReport(repository=\"acme/api-service\", pull_request=42, risk=\"high\", findings=[...])` — 完整报告\n5. **持久化**：`report.to_dict()` → JSON → 存入数据库\n6. **轨迹记录**：每次状态转换创建 `TraceEvent(step=1, state=PLANNING, message=\"diff parsed: 1 file, 14 added lines\")`"
+            },
+            {
+              "type": "text",
+              "text": "**关键概念说明**：\n\n- **Webhook**：一种「事件推送」机制。当 GitHub 上发生某事（如创建 PR），GitHub 会主动向你配置的 URL 发送 HTTP POST 请求通知你。你的服务不需要反复轮询「有没有新 PR？」——GitHub 会主动告诉你。\n- **Checkpoint（存档点）**：就像游戏中的存档——每完成一个处理节点就保存一次当前状态。如果中途崩溃，从最近的存档恢复继续，不用从头开始。\n- **状态机（State Machine）**：一种只能按固定规则转换状态的设计。例如任务只能从 PENDING → PLANNING → EXECUTING → REVIEWING → SUCCESS，不能跳跃（如 PENDING 不能直接到 SUCCESS）。这防止了非法的状态转换。"
+            }
+          ]
+        },
+        {
+          "title": "请求生命周期：从 Webhook 到报告",
+          "anchor": "arch-lifecycle",
+          "groupTitle": "架构设计",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 12,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "理解一个请求从进入到产出的完整路径，是掌握架构的最佳方式。让我们跟踪一个 GitHub PR Webhook 的完整生命周期。"
+            },
+            {
+              "type": "callchain",
+              "callchain": {
+                "endpoint": "POST /webhooks/github",
+                "steps": [
+                  {
+                    "layer": "接入层",
+                    "component": "ApiHandler.do_POST",
+                    "file": "api.py",
+                    "description": "验证 HMAC-SHA256 签名，检查 webhook 时间窗幂等性，解析 pull_request payload"
+                  },
+                  {
+                    "layer": "服务编排层",
+                    "component": "ReviewService.handle_github_pull_request",
+                    "file": "service.py",
+                    "description": "claim_webhook 幂等去重 → 过滤 action → 创建 deferred 任务 → 提交到 TaskQueue"
+                  },
+                  {
+                    "layer": "队列层",
+                    "component": "TaskQueue.submit → _process_queued",
+                    "file": "task_queue.py",
+                    "description": "Redis Streams XADD 或内存队列 → Worker 消费 → 下载 diff → 执行审查"
+                  },
+                  {
+                    "layer": "运行时层",
+                    "component": "ReviewHarness.run",
+                    "file": "harness.py",
+                    "description": "AgentRuntime 执行 3 个节点：planning → executing → reviewing，每步持久化 checkpoint"
+                  },
+                  {
+                    "layer": "审查层",
+                    "component": "MultiAgentCoordinator.review_with_context",
+                    "file": "agents.py",
+                    "description": "MultiAgentCoordinator 启动多 Agent 协作（内部 6 节点：planner → specialists(并行) → deliberation → evidence → verifier → arbiter）"
+                  },
+                  {
+                    "layer": "持久化层",
+                    "component": "TaskStore.succeed",
+                    "file": "store.py",
+                    "description": "保存报告 JSON → 记录 trace event → 更新任务状态为 SUCCESS"
+                  }
+                ]
+              }
+            },
+            {
+              "type": "text",
+              "text": "注意「deferred 任务」的设计：Webhook 到达时并不立即下载 diff，而是只保存 diff_url。真正的 diff 下载发生在 Worker 消费时。这样做的好处是：(1) Webhook 响应极快（<100ms），不会因 GitHub API 延迟阻塞；(2) diff 下载失败可以独立重试；(3) Worker 可以根据 installation_id 选择正确的 GitHub 凭证。\n\n注意上面提到的两个关键概念：(1) **HMAC-SHA256 签名**——确保请求确实来自 GitHub（详见 02-背景知识教程和 14-GitHub 集成教程）；(2) **幂等性**——同一个 PR 的 Webhook 可能因为网络重试被发送多次，claim_webhook 的幂等去重确保系统不会重复创建审查任务。"
+            }
+          ]
+        },
+        {
+          "title": "案例追踪：一个 PR 的完整旅程",
+          "anchor": "arch-case-study",
+          "groupTitle": "架构设计",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 15,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "抽象的架构图不够直观。让我们跟踪一个真实的 PR，看它在系统中经历了什么。这个案例将贯穿后续所有教程。"
+            },
+            {
+              "type": "text",
+              "text": "**场景**：开发者小王在 acme/api-service 仓库提交了 PR #42，标题是「Add deployment script」。这个 PR 只修改了一个文件 deploy.py，新增了 14 行代码。小王不知道的是，这 14 行里藏着 5 个真实的安全/可靠性问题。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "diff",
+                "content": "--- a/deploy.py                    # 【旧文件】部署脚本的原始版本\n+++ b/deploy.py                    # 【新文件】PR #42 修改后的版本\n@@ -1,3 +1,15 @@                   # 【Hunk 头】旧文件从第1行开始共3行，新文件从第1行开始共15行\n import os                         # 上下文行：原有代码，保持不变\n+import subprocess                  # 【新增第2行】导入 subprocess 模块——用于执行系统命令\n+                                  # 空行，保持代码格式\n+API_KEY = \"sk-prod-a1b2c3d4e5\"    # 【新增第4行】❌ 硬编码生产密钥！SEC-HARDCODED-SECRET 规则命中\n+DB_PASSWORD = os.environ.get(\"DB_PASSWORD\", \"\")  # 【新增第5行】从环境变量读取——看起来像密钥但实际安全\n+                                  # 空行\n+def deploy_service(env):          # 【新增第7行】定义部署函数\n+    config = fetch_config(env)    # 【新增第8行】获取环境配置\n+    print(f\"Deploying to {env} with key {API_KEY}\")  # 【新增第9行】❌ 打印密钥到日志！REL-DEBUG-PRINT 规则命中\n+    subprocess.run(f\"kubectl apply -f {config}\", shell=True)  # 【新增第10行】❌ shell=True 允许命令注入！SEC-SUBPROCESS-SHELL 规则命中\n+    cursor.execute(\"SELECT * FROM deployments WHERE env='\" + env + \"'\")  # 【新增第11行】❌ SQL 字符串拼接导致注入！SEC-SQL-CONCAT 规则命中\n+    try:                          # 【新增第12行】开始异常处理\n+        run_smoke_tests(env)      # 【新增第13行】执行冒烟测试\n+    except Exception:             # 【新增第14行】❌ 捕获所有异常！REL-EMPTY-EXCEPT 规则命中\n+        pass                      # 【新增第15行】静默吞掉异常——测试失败也不会被发现",
+                "caption": "PR #42 的完整 diff——14 行新增代码，包含 5 个真实问题"
+              }
+            },
+            {
+              "type": "text",
+              "text": "下面是这 5 个问题，以及系统如何处理它们："
+            },
+            {
+              "type": "table",
+              "table": {
+                "headers": [
+                  "行号",
+                  "问题",
+                  "规则",
+                  "严重级别",
+                  "系统行为"
+                ],
+                "rows": [
+                  [
+                    "第 4 行",
+                    "API_KEY = \"sk-prod-...\" 硬编码了生产密钥",
+                    "SEC-HARDCODED-SECRET",
+                    "high",
+                    "Security Agent 匹配字符串赋值模式 → Critic 检查证据 → 通过"
+                  ],
+                  [
+                    "第 10 行",
+                    "shell=True 允许命令注入",
+                    "SEC-SUBPROCESS-SHELL",
+                    "high",
+                    "Security Agent 匹配 shell=True → Evidence 独立验证 → 通过"
+                  ],
+                  [
+                    "第 9 行",
+                    "print() 在生产代码中泄露密钥",
+                    "REL-DEBUG-PRINT",
+                    "low",
+                    "Reliability Agent 匹配 print( → 通过"
+                  ],
+                  [
+                    "第 11 行",
+                    "SQL 字符串拼接导致注入",
+                    "SEC-SQL-CONCAT",
+                    "high",
+                    "Security Agent 匹配 cursor.execute(...+ → 通过"
+                  ],
+                  [
+                    "第 13-14 行",
+                    "except Exception: pass 吞掉所有错误",
+                    "REL-EMPTY-EXCEPT",
+                    "medium",
+                    "Reliability Agent 匹配 except Exception: → 通过"
+                  ],
+                  [
+                    "第 5 行",
+                    "DB_PASSWORD = os.environ.get(...) 看起来像密钥",
+                    "—",
+                    "—",
+                    "LLM Agent 可能报告，但 Evidence 检查发现是 os.environ → 被 Critic 质疑 → 被过滤为误报"
+                  ]
+                ]
+              }
+            },
+            {
+              "type": "text",
+              "text": "**第 1 步：Webhook 到达（接入层）**"
+            },
+            {
+              "type": "text",
+              "text": "小王点击 GitHub 的「Create pull request」按钮。GitHub 向 EvoAgent 的公网地址发送一个 POST 请求，body 是 PR 的 JSON payload（包含仓库名、PR 编号、diff 下载 URL）。ApiHandler 先验证 HMAC-SHA256 签名（确认请求确实来自 GitHub，不是伪造的），然后创建一个「deferred」任务——只记录「有一个 PR #42 需要审查」，不立即下载 diff。Webhook 在 100ms 内返回 202 Accepted，小王在 GitHub 端看到请求成功。"
+            },
+            {
+              "type": "text",
+              "text": "**第 2 步：Worker 消费任务（队列层 + 服务编排层）**"
+            },
+            {
+              "type": "text",
+              "text": "TaskQueue 的 Worker 从队列取出任务。它使用 GitHub token 下载 PR #42 的 diff（就是上面那段 14 行代码）。ReviewService 收到 diff 后，创建 ReviewHarness 开始审查。"
+            },
+            {
+              "type": "text",
+              "text": "**第 3 步：三节点审查（运行时层）**"
+            },
+            {
+              "type": "text",
+              "text": "planning 节点：parse_unified_diff() 解析 diff，识别出 1 个文件（deploy.py）、14 行新增。executing 节点：MultiAgentCoordinator 启动多 Agent 协作（详见 08-多Agent 教程）。reviewing 节点：汇总 Finding，计算风险等级（存在 high → 整体 risk=\"high\"），生成 ReviewReport。"
+            },
+            {
+              "type": "text",
+              "text": "**第 4 步：报告生成（report.py）**"
+            },
+            {
+              "type": "text",
+              "text": "to_markdown() 将 ReviewReport 转为 Markdown。小王在 PR 中看到的评论大致如下："
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "markdown",
+                "content": "# EvoAgent PR Review — #42           # 【报告标题】标识这是对 PR #42 的审查结果\n**Repository:** `acme/api-service`   # 【元信息】仓库名称\n**Risk:** `high`                     # 【风险等级】存在 HIGH 级别问题，整体风险为 high\n**Reviewer:** `multi-agent-coordinator`  # 【审查者】多 Agent 协作协调器\n\n## Findings                         # 【发现列表】所有审查发现的问题汇总\n\n### 1. 🔴 Hardcoded production API key  # 【Finding 1】硬编码密钥问题（🔴 表示严重）\n`deploy.py:4` · **HIGH** · `SEC-HARDCODED-SECRET`  # 文件位置 · 严重级别 · 规则 ID\n\nThe added line assigns a production API key as a string literal.  # 问题描述：新增行把生产密钥写成字符串\n\n**Evidence**                         # 【证据】证明问题存在的代码片段\n```text\nAPI_KEY = \"sk-prod-a1b2c3d4e5\"      # 问题代码：密钥被硬编码在源代码中\n```\n**Suggested fix:** API_KEY = os.environ[\"API_KEY\"]  # 【修复建议】从环境变量读取密钥\n**Suggested test:** Add a test that verifies the key is loaded from env.  # 【测试建议】添加测试验证密钥来源\n\n### 2. 🔴 Subprocess shell injection  # 【Finding 2】命令注入问题\n...                                  # （省略，格式同上）\n\n### 3. 🔴 SQL string concatenation    # 【Finding 3】SQL 注入问题\n...                                  # （省略，格式同上）\n\n### 4. 🟡 Debug print in production code  # 【Finding 4】调试输出问题（🟡 表示低严重级别）\n...                                  # （省略，格式同上）\n\n### 5. 🟠 Swallowed exception         # 【Finding 5】异常吞没问题（🟠 表示中等严重级别）\n...",
+                "caption": "小王在 PR 中看到的审查报告（节选）"
+              }
+            },
+            {
+              "type": "text",
+              "text": "注意第 5 行的 `DB_PASSWORD = os.environ.get(...)` 没有出现在报告中。虽然 LLM Agent 可能最初报告了它，但 Critic 检查证据时发现这不是硬编码密钥（而是从环境变量读取），Evidence 独立验证也确认了这一点，最终 Verifier 以「证据不支持」为由拒绝了这个 Finding。这就是多 Agent 协作过滤误报的价值。"
+            },
+            {
+              "type": "text",
+              "text": "**第 5 步：后续（开发者反馈 + 自动修复 + 进化）**"
+            },
+            {
+              "type": "text",
+              "text": "小王看到审查报告后：(1) 修复了硬编码密钥，改为 os.environ[\"API_KEY\"]；(2) 认为第 4 条 print 是故意加的调试日志，标记为「误报」(false_positive)；(3) 接受了其他修复建议。系统的后续行为：(1) SafeFixer 在 evoagent/fix-pr-42-20260810... 分支上自动修复了 shell=True→False 和 print 调试输出（SafeFixer 只处理 3 种确定性高的规则，except Exception: pass 和 SQL 拼接超出其能力范围，需要人工修复）；(2) 误报反馈被记录，下次 EvolutionEngine.auto_propose() 会从中提取学习信号，让 LLM 减少类似的过度报告。这个闭环详见 12-进化教程。"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

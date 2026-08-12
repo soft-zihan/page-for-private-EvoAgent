@@ -1,0 +1,296 @@
+{
+  "chapters": [
+    {
+      "id": "design-patterns",
+      "title": "设计模式与模块索引",
+      "sections": [
+        {
+          "title": "设计模式识别",
+          "anchor": "arch-patterns",
+          "groupTitle": "架构设计",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 10,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "EvoAgent 中使用了多种经典设计模式。识别这些模式能帮助你快速定位代码的组织逻辑。"
+            },
+            {
+              "type": "text",
+              "text": "在深入表格之前，先理解几个核心概念：\n\n**什么是设计模式？** 设计模式是软件工程中反复出现的「最佳实践」解决方案。就像建筑中的「拱门」「飞扶壁」——每种结构解决一种力学问题。软件设计模式也是类似——每种模式解决一种代码组织问题。下面用生活化类比解释项目中用到的模式。\n\n**什么是幂等性（Idempotency）？** 幂等性指同一个操作执行一次和执行多次结果相同。就像电梯的「关门」按钮——不管你按了 1 次还是 10 次，门只会关一次。在分布式系统中，网络请求可能重试，幂等性保证重复请求不会产生副作用（如重复创建任务）。\n\n**什么是 HMAC？** 将在 10-认证与队列 中详细讲解。简单说，它就像火漆印章，用共享密钥给消息签名，接收方验证签名确认消息来源和完整性。\n\n**什么是 OpenTelemetry？** 将在本章「基础设施模块」一节中详细讲解。简单说，它是系统的「全套体检设备」——Trace（追踪路径）、Metrics（数值指标）、Logs（日志）三类可观测数据的统一收集标准。"
+            },
+            {
+              "type": "table",
+              "table": {
+                "headers": [
+                  "模式",
+                  "实现位置",
+                  "用途"
+                ],
+                "rows": [
+                  [
+                    "策略模式 (Strategy)",
+                    "Reviewer 抽象类 + 多个实现",
+                    "规则审查器、LLM审查器、Skill审查器可互换"
+                  ],
+                  [
+                    "组合模式 (Composite)",
+                    "CompositeReviewer / MultiAgentCoordinator",
+                    "将多个 Reviewer 组合为统一接口"
+                  ],
+                  [
+                    "工厂方法",
+                    "ReviewService._build_llm_reviewer",
+                    "根据配置创建不同 LLM Reviewer 实例"
+                  ],
+                  [
+                    "状态机",
+                    "TaskState + ALLOWED 转换表",
+                    "控制任务生命周期的合法状态转换"
+                  ],
+                  [
+                    "责任链",
+                    "AgentRuntime 节点序列",
+                    "planning → executing → reviewing 顺序执行"
+                  ],
+                  [
+                    "观察者",
+                    "EventSink / CollaborationBus",
+                    "Agent 间消息传递和事件记录"
+                  ],
+                  [
+                    "仓储模式 (Repository)",
+                    "TaskStore / PostgresTaskStore",
+                    "统一数据访问接口，屏蔽 SQLite/PG 差异"
+                  ],
+                  [
+                    "适配器",
+                    "FilteredAgent / DeclarativeSkillReviewer",
+                    "将不同接口适配为 Reviewer 协议"
+                  ]
+                ]
+              }
+            },
+            {
+              "type": "text",
+              "text": "特别值得注意的是「双模持久化」的仓储模式。TaskStore（SQLite）和 PostgresTaskStore（PostgreSQL）实现了完全相同的公开 API。create_store() 工厂函数根据 database_url 前缀选择实现。这意味着所有业务代码只依赖 TaskStore 接口，切换数据库不需要修改任何业务逻辑。"
+            },
+            {
+              "type": "text",
+              "text": "下面用通俗类比解释上表中每个设计模式的含义：\n\n- **策略模式**：就像「支付方式」——你可以用支付宝、微信、现金，但收银台只关心「付钱」这个接口。项目中 RuleReviewer、LLMReviewer、SkillReviewer 都是不同的「审查策略」，Coordinator 统一调用 review() 方法。\n- **组合模式**：就像「文件夹」——文件夹里可以放文件，也可以放其他文件夹，但对外的操作都是「打开」。CompositeReviewer 把多个审查器组合成一个，调用者不需要知道里面有几个。\n- **工厂方法**：就像「自动售货机」——你投币选饮料，机器内部决定给你哪瓶。_build_llm_reviewer() 根据配置决定创建哪种 LLM 审查器。\n- **状态机**：就像「棋盘规则」——棋子只能按固定规则移动。任务只能从 PENDING → PLANNING → EXECUTING → REVIEWING → SUCCESS，不能跳跃。\n- **责任链**：就像「工厂流水线」——产品依次经过每道工序。planning → executing → reviewing 三个节点顺序执行，每个节点完成后交给下一个。\n- **观察者**：就像「微信群」——有人发消息，所有群成员都能收到。EventSink 记录事件，CollaborationBus 传递 Agent 间的消息。\n- **仓储模式**：就像「图书馆前台」——不管背后是哪种书架系统，借书还书的流程都一样。TaskStore 屏蔽了 SQLite 和 PostgreSQL 的差异。\n- **适配器**：就像「电源转换插头」——不同国家的插座形状不同，但转换器让它们都能用。FilteredAgent 和 DeclarativeSkillReviewer 把不同接口统一为 Reviewer 协议。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# 仓储工厂函数：体现仓储模式（Repository Pattern）的核心思想\n# 业务代码只依赖 TaskStore 抽象接口，不关心底层是 SQLite 还是 PostgreSQL\ndef create_store(database_url: str, sqlite_path: str):\n    # 如果 database_url 以 postgres 前缀开头 → 使用 PostgreSQL 后端\n    # 支持两种常见前缀格式：postgres:// 和 postgresql://\n    if database_url.startswith((\"postgres://\", \"postgresql://\")):\n        return PostgresTaskStore(database_url)\n    # 否则使用延迟导入（lazy import）加载 SQLite 后端\n    # 延迟导入的好处：不需要 PostgreSQL 驱动时不用安装 psycopg\n    from .store import TaskStore\n    # 返回 SQLite 实现，sqlite_path 是数据库文件路径（默认 evoagent.db）\n    return TaskStore(sqlite_path)",
+                "caption": "仓储工厂：根据 URL 前缀透明切换数据库后端"
+              }
+            }
+          ]
+        },
+        {
+          "title": "模块依赖关系",
+          "anchor": "arch-dependencies",
+          "groupTitle": "架构设计",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 8,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "模块之间的依赖关系决定了代码的阅读顺序。下面是核心依赖链——箭头表示「依赖于」关系。"
+            },
+            {
+              "type": "diagram",
+              "diagram": {
+                "language": "mermaid",
+                "content": "graph LR\n    api --> service\n    service --> harness\n    service --> agents\n    service --> task_queue\n    service --> auth\n    service --> github\n    service --> fixer\n    service --> evolution\n    service --> skill_evolution\n    service --> rollout\n    harness --> runtime\n    harness --> diff_parser\n    harness --> store\n    agents --> runtime\n    agents --> context_manager\n    agents --> memory\n    agents --> reviewer\n    agents --> diff_parser\n    reviewer --> diff_parser\n    reviewer --> models\n    evolution --> diff_parser\n    evolution --> store\n    skill_evolution --> evolution\n    skill_evolution --> diff_parser\n    fixer --> verifier\n    fixer --> github\n    rollout --> store\n    memory --> store\n    context_manager -.-> models\n    store --> models\n    postgres_store --> models",
+                "caption": "模块依赖关系图（实线=直接依赖，虚线=间接依赖）"
+              }
+            },
+            {
+              "type": "text",
+              "text": "推荐的代码阅读顺序（从叶子到根）：models → diff_parser → store → reviewer → runtime → context_manager → memory → agents → harness → task_queue → auth → github → fixer → evolution → skill_evolution → rollout → service → api。这个顺序保证你在阅读每个文件时，它的所有依赖都已经被理解。"
+            },
+            {
+              "type": "list",
+              "list": {
+                "style": "unordered",
+                "items": [
+                  {
+                    "content": "无依赖叶子模块：models.py, diff_parser.py, metrics.py, report.py"
+                  },
+                  {
+                    "content": "仅依赖叶子的基础模块：store.py, runtime.py, reviewer.py"
+                  },
+                  {
+                    "content": "跨模块协调：context_manager.py, memory.py, auth.py"
+                  },
+                  {
+                    "content": "核心编排：agents.py → harness.py → service.py → api.py"
+                  },
+                  {
+                    "content": "独立功能模块：evolution.py, skill_evolution.py, fixer.py, rollout.py"
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "title": "基础设施模块：配置、指标与可观测性",
+          "anchor": "arch-infra-modules",
+          "groupTitle": "架构设计",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 10,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "有三个基础设施模块贯穿整个系统，虽然不属于核心审查流程，但在生产运行中不可或缺。"
+            },
+            {
+              "type": "text",
+              "text": "config.py（313行）：Settings 数据类集中管理 ~65 个环境变量。load_dotenv() 在模块导入时自动加载 .env 文件（项目根目录优先于 evoagent/ 子目录）。resolved_llm() 根据 llm_provider 路由到不同的 LLM 后端（deepseek、openrouter-free、openrouter-deepseek-free、custom），每个后端有不同的 base_url 和默认模型。validate_evolution() 校验进化参数的合理性（如 min_cases ≤ max_cases、auth_secret ≥ 32 字节）。"
+            },
+            {
+              "type": "text",
+              "text": "config.py 中的 Settings dataclass 在 01-前置准备 中已详细介绍。这里补充的是完整的 LLM 路由逻辑：resolved_llm() 根据 llm_provider 名称路由到不同后端（deepseek、openrouter-free、custom），每个后端有不同的 base_url 和默认模型。validate_evolution() 校验进化参数的合理性（如 min_cases ≤ max_cases、auth_secret ≥ 32 字节）。"
+            },
+            {
+              "type": "text",
+              "text": "metrics.py（45行）：轻量级指标收集器，支持计数器（inc）和计时器（timer 上下文管理器）。prometheus() 方法输出 Prometheus 文本格式，/metrics 端点直接暴露。线程安全——所有操作在 threading.Lock 内执行。\n\n**什么是 Prometheus 和端点？** Prometheus 是一个开源的系统监控工具——它定期来你的服务「抄表」，收集运行指标（如请求数、耗时、错误率）。**端点（Endpoint）** 是 API 上的一个 URL 地址——就像门店的一个服务窗口。`/metrics` 端点就是 Prometheus 来「抄表」的窗口。当 Prometheus 访问 `http://你的服务:8080/metrics` 时，metrics.py 会返回一段文本格式的指标数据，格式如 `evoagent_reviews_total 42`（指标名 + 数值），Prometheus 解析后存入监控数据库。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# Metrics：轻量级线程安全指标收集器\n# 不依赖 Prometheus 客户端库，纯手工实现——保持最小依赖原则\n# Metrics：核心类，封装了系统的关键行为和状态\nclass Metrics:\n    def __init__(self):\n        # threading.Lock 保证多线程并发更新指标时的原子性\n        self._lock = threading.Lock()\n        # 计数器字典：name → 累计值（如 reviews_total → 42.0）\n        self.counters = defaultdict(float)       # 计数器\n        # 耗时累计字典：name → 总耗时秒数（如 review_duration → 123.45）\n        # 初始化字典 duration_sum，用于存储键值对数据\n        self.duration_sum = defaultdict(float)   # 耗时累计\n        # 耗时次数字典：name → 调用次数（用于计算平均耗时）\n        # 初始化字典 duration_count，用于存储键值对数据\n        self.duration_count = defaultdict(int)   # 耗时计数\n\n    def inc(self, name, value=1.0):\n        # 在锁内更新计数器，防止多线程竞争条件\n        with self._lock:\n            self.counters[name] += value\n\n    @contextmanager\n    # timer：公开方法，实现核心业务逻辑\n    def timer(self, name):\n        # 上下文管理器：用 time.monotonic() 获取单调递增时间（不受系统时钟调整影响）\n        started = time.monotonic()\n        try:\n            yield  # 让出控制权，执行 with 块内的业务代码\n        # 无论是否发生异常都会执行的清理代码\n        finally:\n            # 无论业务代码是否抛异常，都要记录耗时\n            elapsed = time.monotonic() - started\n            with self._lock:\n                self.duration_sum[name] += elapsed\n                self.duration_count[name] += 1\n\n    def prometheus(self) -> str:\n        \"\"\"输出 Prometheus 文本格式（/metrics 端点使用）\"\"\"\n        with self._lock:\n            lines = []\n            # 输出所有计数器：格式遵循 Prometheus  exposition 规范\n            for name, value in sorted(self.counters.items()):\n                lines.extend([\"# TYPE evoagent_%s counter\" % name,\n                              \"evoagent_%s %s\" % (name, value)])\n            # 输出所有耗时统计：summary 类型包含 _sum 和 _count 两行\n            for name, value in sorted(self.duration_sum.items()):\n                lines.extend([\n                    \"# TYPE evoagent_%s_seconds summary\" % name,\n                    \"evoagent_%s_seconds_sum %s\" % (name, value),\n                    \"evoagent_%s_seconds_count %s\" % (name, self.duration_count[name]),\n                ])\n            # 用换行符拼接所有行，末尾加换行（Prometheus 规范要求）\n            return \"\\n\".join(lines) + \"\\n\"\n\n# 全局单例：整个进程共享同一个 Metrics 实例，所有模块通过 metrics.inc() 上报指标\nmetrics = Metrics()  # 全局单例",
+                "caption": "metrics.py：线程安全的计数器 + 计时器 + Prometheus 输出"
+              }
+            },
+            {
+              "type": "text",
+              "text": "observability.py（67行）：OpenTelemetry 可选集成 + AlertManager。Observability 类在 OpenTelemetry 未安装时优雅降级（tracer=None），span() 上下文管理器在有/无 tracer 时都能正常工作。AlertManager 定期评估租户的审查失败率，超过阈值时自动创建告警。\n\n**OpenTelemetry 通俗解释**：想象你开了一家快递公司，需要监控每个包裹的运输过程。OpenTelemetry 就是你的全套监控系统：\n- **Trace（追踪）**：跟踪一个包裹从发货到签收的完整路径——经过哪些中转站、每段花了多久\n- **Span（跨度）**：路径中的每一段——「从北京中转站到上海中转站」就是一个 Span\n- **Span Processor**：把 Span 数据发送到监控后台（如 Jaeger、Zipkin）\n\n项目中的 `Observability.span(\"review\", task_id=...)` 就是在追踪「审查」这一段路径。如果 OpenTelemetry 没安装，span() 静默通过，不影响正常功能——这就是「优雅降级」。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# Observability：分布式追踪封装类\n# 核心设计：优雅降级——OpenTelemetry 未安装时 tracer=None，span() 静默通过\n# Observability：核心类，封装了系统的关键行为和状态\nclass Observability:\n    def __init__(self, service_name=\"evoagent\", endpoint=\"\"):\n        self.tracer = None  # 先初始化为 None，后续尝试激活\n        try:\n            from opentelemetry import trace\n            # 创建 TracerProvider 并绑定服务名（用于在 Jaeger/Zipkin 中标识）\n            # Resource 描述服务的元数据，service.name 是 OpenTelemetry 标准属性\n            provider = TracerProvider(resource=Resource.create({\"service.name\": service_name}))\n            if endpoint:\n                # 配置 OTLP 导出器：将 Span 数据通过 HTTP 发送到收集器（如 Jaeger）\n                # BatchSpanProcessor 批量发送，减少网络开销\n                provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint)))\n            # 将 Provider 设为全局默认，后续所有 trace.get_tracer() 都使用它\n            trace.set_tracer_provider(provider)\n            # 获取属于本服务的 Tracer 实例\n            self.tracer = trace.get_tracer(service_name)\n        # 捕获 ImportError 异常，执行错误恢复逻辑\n        except ImportError:\n            # OpenTelemetry 未安装 → tracer 保持 None\n            # 这是「优雅降级」的关键：所有使用 self.tracer 的代码都要先检查是否为 None\n            self.tracer = None  # OpenTelemetry 未安装，优雅降级\n\n    @contextmanager\n    # span：公开方法，实现核心业务逻辑\n    def span(self, name, trace_id=\"\", **attributes):\n        # span() 是上下文管理器，用法：with observability.span(\"review\", task_id=xxx) as s:\n        if self.tracer:\n            # 有 tracer：创建真实的 Span（追踪的一段路径）\n            with self.tracer.start_as_current_span(name) as span:\n                # 将自定义属性附加到 Span 上（如 task_id、repository 等）\n                for key, value in attributes.items():\n                    if value is not None:\n                        span.set_attribute(key, value)\n                yield span  # 让出控制权，执行业务代码\n        else:\n            # 无 tracer：静默通过，返回 None\n            # 业务代码拿到 None 也不报错——这就是优雅降级的价值\n            yield None  # 无 tracer 时静默通过\n\n# AlertManager：自动告警管理器\n# 定期评估租户的审查失败率，超过阈值时自动创建告警记录\n# AlertManager：核心类，封装了系统的关键行为和状态\nclass AlertManager:\n    # evaluate：公开方法，实现核心业务逻辑\n    def evaluate(self, tenant_id):\n        \"\"\"评估租户失败率，超阈值自动告警\"\"\"\n        # 从数据库获取该租户的仪表板统计数据\n        stats = self.store.dashboard_stats(tenant_id)\n        # 样本量足够才评估（避免只有 1-2 次任务时误报告警）\n        if stats[\"tasks_total\"] >= self.min_samples:\n            # 计算失败率 = 失败任务数 / 总任务数\n            rate = stats[\"tasks_failed\"] / stats[\"tasks_total\"]\n            # 失败率超过阈值（默认 20%）→ 创建 critical 级别告警\n            if rate > self.failure_rate:\n                # 将告警持久化到数据库，管理员可在 Dashboard 查看\n                self.store.create_alert(tenant_id, \"review-failure-rate\", \"critical\",\n                    \"Review failure rate %.1f%% exceeds the %.1f%% threshold.\" % (rate * 100, self.failure_rate * 100))",
+                "caption": "observability.py：OpenTelemetry 可选集成 + AlertManager 自动告警"
+              }
+            }
+          ]
+        },
+        {
+          "title": "关键源码索引表",
+          "anchor": "arch-source-index",
+          "groupTitle": "架构设计",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 5,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "以下是核心功能对应的源码入口点，帮助你快速定位代码："
+            },
+            {
+              "type": "table",
+              "table": {
+                "headers": [
+                  "主题",
+                  "文件和入口"
+                ],
+                "rows": [
+                  [
+                    "线上运行时 Harness",
+                    "evoagent/harness.py:37，ReviewHarness"
+                  ],
+                  [
+                    "状态迁移规则",
+                    "evoagent/harness.py:14，ALLOWED"
+                  ],
+                  [
+                    "运行时状态",
+                    "evoagent/harness.py:22，RuntimeState"
+                  ],
+                  [
+                    "线上三个节点",
+                    "evoagent/harness.py:120、127、142"
+                  ],
+                  [
+                    "节点编排引擎",
+                    "evoagent/runtime.py，AgentRuntime.execute()"
+                  ],
+                  [
+                    "预算和取消",
+                    "evoagent/harness.py:41"
+                  ],
+                  [
+                    "任务模型",
+                    "evoagent/models.py:6、31、50"
+                  ],
+                  [
+                    "SQLite checkpoint",
+                    "evoagent/store.py:146、824"
+                  ],
+                  [
+                    "PostgreSQL checkpoint",
+                    "evoagent/postgres_store.py:76、639"
+                  ],
+                  [
+                    "Service 组装 Harness",
+                    "evoagent/service.py:32"
+                  ],
+                  [
+                    "Service 选择运行时 Reviewer",
+                    "evoagent/service.py:121"
+                  ],
+                  [
+                    "多 Agent 协作",
+                    "evoagent/agents.py:385，MultiAgentCoordinator"
+                  ],
+                  [
+                    "离线评测 Harness",
+                    "evoagent/evaluation_harness.py:258"
+                  ],
+                  [
+                    "一对一匹配",
+                    "evoagent/evaluation_harness.py:143"
+                  ],
+                  [
+                    "受控修复器",
+                    "evoagent/evaluation_harness.py:176"
+                  ],
+                  [
+                    "发布门禁",
+                    "evoagent/evaluation_harness.py:506"
+                  ],
+                  [
+                    "评测命令",
+                    "scripts/run_e2e_evaluation.py:135"
+                  ],
+                  [
+                    "Harness 基础测试",
+                    "tests/test_harness.py:19"
+                  ],
+                  [
+                    "checkpoint 恢复测试",
+                    "tests/test_production_features.py:58"
+                  ],
+                  [
+                    "评测测试",
+                    "tests/test_evaluation_harness.py:21"
+                  ]
+                ]
+              }
+            },
+            {
+              "type": "text",
+              "text": "架构和模块索引已经清晰。下一章动手实操，5 分钟完成第一次代码审查。"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

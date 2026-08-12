@@ -1,0 +1,298 @@
+{
+  "chapters": [
+    {
+      "id": "runtime",
+      "title": "运行时",
+      "sections": [
+        {
+          "title": "背景知识：为什么需要自研运行时",
+          "anchor": "practice-runtime-background",
+          "groupTitle": "Agent 运行时模块",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 10,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "EvoAgent 没有使用 LangChain、AutoGen 等现有 Agent 框架，而是自研了两个运行时组件：AgentRuntime（节点编排引擎）和 AgentLoop（模型/工具循环）。为什么？因为项目需要三个关键能力：(1) 持久化 checkpoint 支持断点续跑；(2) 严格的步骤和时间预算控制；(3) 任务取消检查。现有框架很难同时满足这三点。"
+            },
+            {
+              "type": "text",
+              "text": "runtime.py 包含两个独立但互补的引擎。AgentRuntime 执行一个有向节点图（类似简化版的工作流引擎），每个节点完成后可以持久化 checkpoint。AgentLoop 执行模型/工具循环——模型选择调用工具或返回最终结果，工具执行结果作为 observation 反馈给下一轮。"
+            },
+            {
+              "type": "text",
+              "text": "在深入代码之前，先理解几个核心概念：\n\n**什么是有向节点图？** 有向节点图（Directed Graph）是一组节点用箭头连接的结构，箭头表示执行方向。就像工厂流水线——原材料从第一个工位流向第二个、第三个，不能回头。项目的 PR 审查流程就是一个三节点有向图：planning → executing → reviewing。每个节点完成后才能进入下一个。\n\n**什么是 ReAct 模式？** ReAct（Reason + Act）是 LLM Agent 的工作模式。模型先「思考」（Reason）：我应该调用什么工具？然后「行动」（Act）：调用工具。拿到工具返回的结果（Observation）后，再思考下一步。循环往复直到模型认为信息足够，返回最终结论。就像侦探破案——先推理（应该查指纹），再行动（采集指纹），拿到结果后再推理（指纹匹配嫌疑人 A），再行动（审讯 A）……直到破案。\n\n**什么是幂等？** 幂等（Idempotent）是指操作执行一次和执行多次结果相同。就像电梯按钮——按一次电梯来，按十次电梯还是来一趟。成功任务有幂等行为：如果任务已经 SUCCESS，再次调用不会重新审查，而是直接返回已保存的报告。\n\n**什么是 JSON Schema？** JSON Schema 是一种描述 JSON 数据格式的规范——定义字段名称、类型、是否必填等。就像表格模板——规定了第一列填姓名（文本）、第二列填年龄（数字）、第三列必填。项目用它来校验工具参数的格式是否正确。"
+            }
+          ]
+        },
+        {
+          "title": "AgentRuntime：有界节点编排引擎",
+          "anchor": "practice-runtime-agent-runtime",
+          "groupTitle": "Agent 运行时模块",
+          "difficulty": "advanced",
+          "estimatedMinutes": 20,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "AgentRuntime.execute() 是系统的执行心脏。它接收一个初始状态和一组 RuntimeNode，按顺序执行每个节点。关键特性：步骤预算、时间预算、取消检查、checkpoint 持久化、重试策略。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# AgentRuntime：有界节点编排引擎——系统的「执行心脏」\n# 职责：按顺序执行一组 RuntimeNode，每步受预算约束，支持断点续跑\n# AgentRuntime：核心类，封装了系统的关键行为和状态\nclass AgentRuntime:\n    # execute：公开方法，实现核心业务逻辑\n    def execute(self, initial_state, nodes, task_id=\"\", checkpoint_store=None,\n                cancel_check=None, event_sink=None, span_factory=None,\n                non_retryable=(ValueError, RuntimeCancelled, RuntimeBudgetExceeded)):\n        # 深拷贝初始状态，避免修改调用方的原始数据\n        state = dict(initial_state)\n        started = time.monotonic()  # 记录开始时间（单调时钟，不受系统时间调整影响）\n        steps = 0  # 全局步骤计数器——所有节点共享\n        # 加载已有 checkpoint（支持断点续跑）\n        # 如果 Worker 崩溃重启，可以从上次成功的节点继续，不用从头开始\n        checkpoints = (\n            checkpoint_store.load_checkpoints(task_id)\n            if checkpoint_store is not None and task_id else {}\n        )\n\n        # 按顺序执行每个节点（责任链模式）\n        for node in nodes:\n            # 1. 检查是否有已完成的 checkpoint → 跳过该节点（断点续跑的核心）\n            cached = checkpoints.get(node.name) if node.checkpoint else None\n            if cached and cached.get(\"status\") == \"completed\":\n                # 从 checkpoint 恢复状态，相当于「时光倒流」到上次成功的位置\n                output = dict(cached.get(\"state\") or {})\n                state.update(output)\n                continue  # 跳过此节点，直接进入下一个\n\n            # 2. 重试循环：节点失败时最多重试 node_retries 次\n            retries = self.node_retries if node.retries is None else node.retries\n            last_error = None\n            for offset in range(1, retries + 2):  # +2 因为 range 不包含上界，实际执行 1+retries 次\n                # 2a. 预算和取消检查——每个节点尝试前都检查\n                if cancel_check and cancel_check():\n                    # 协作式取消：外部设置了取消标志\n                    raise RuntimeCancelled(\"Task was cancelled\")\n                if steps >= self.max_steps or time.monotonic() - started > self.timeout_seconds:\n                    # 双重预算控制：步骤数超限 或 时间超限\n                    raise RuntimeBudgetExceeded(\"task execution budget exceeded\")\n                steps += 1\n                # 初始化集合 attempt，用于去重和快速查找\n                attempt = offset\n\n                try:\n                    # 执行节点处理函数——传入当前状态，返回状态更新\n                    output = node.handler(state) or {}\n                    state.update(output)  # 合并节点输出到全局状态\n                    # 2b. 持久化 checkpoint——节点成功后立即保存\n                    # 这样即使后续节点崩溃，此节点的成果也不会丢失\n                    if checkpoint_store and task_id and node.checkpoint:\n                        checkpoint_store.save_checkpoint(task_id, node.name, output, \"completed\", attempt)\n                    break  # 成功，退出重试循环\n                # 捕获 non_retryable 异常，执行错误恢复逻辑\n                except non_retryable:\n                    raise  # 不可重试异常（ValueError/取消/预算超限）直接抛出\n                except Exception as exc:\n                    # 可重试异常：记录失败 checkpoint 并继续重试\n                    last_error = exc\n                    if checkpoint_store and task_id and node.checkpoint:\n                        checkpoint_store.save_checkpoint(task_id, node.name, {}, \"failed\", attempt, str(exc))\n            # 所有重试都失败 → 抛出最后一个异常\n            if last_error:\n                raise last_error\n        return state  # 返回最终状态（包含所有节点的输出）",
+                "caption": "AgentRuntime.execute() 核心逻辑（简化版）"
+              }
+            },
+            {
+              "type": "text",
+              "text": "这段代码有几个精妙的设计决策：(1) checkpoint 恢复是透明的——如果 planning 节点已完成，状态直接从数据库恢复，不重新执行；(2) 不可重试异常（ValueError、RuntimeCancelled、RuntimeBudgetExceeded）直接穿透重试循环；(3) 每次失败也保存 checkpoint（status=failed），使得外部可以知道任务在哪个节点失败。"
+            }
+          ]
+        },
+        {
+          "title": "AgentLoop：模型/工具循环",
+          "anchor": "practice-runtime-agent-loop",
+          "groupTitle": "Agent 运行时模块",
+          "difficulty": "advanced",
+          "estimatedMinutes": 15,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "AgentLoop 实现了经典的 ReAct 模式（Reason + Act）：模型在每一步选择调用工具或返回最终结果。工具执行结果被记录为 observation，在下一轮反馈给模型。循环受步骤数和时间双重预算控制。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# AgentLoop：实现经典 ReAct 模式（Reason + Act）的有界循环\n# 模型在每一步选择：调用工具获取更多信息，或返回最终结论\n# 「有界」= 步骤数 + 时间双重预算控制，防止无限循环\n# AgentLoop：核心类，封装了系统的关键行为和状态\nclass AgentLoop:\n    def run(self, stepper, tools, initial_state, event_sink=None):\n        state = dict(initial_state)  # 拷贝状态，避免修改外部数据\n        # 初始化列表 observations，用于收集/存储多条数据\n        observations = []  # 工具调用的观察结果列表——每轮累积\n        started = time.monotonic()  # 记录循环开始时间\n\n        # 有界循环：最多执行 max_steps 步\n        for step in range(1, self.max_steps + 1):\n            # 时间预算检查：超过 timeout_seconds 则终止\n            if time.monotonic() - started > self.timeout_seconds:\n                raise RuntimeBudgetExceeded(\"agent loop time budget exceeded\")\n            # 将当前步数和已有观察注入状态，供模型参考\n            state[\"loop_step\"] = step\n            # 初始化列表 state[\"observations\"]，用于收集/存储多条数据\n            state[\"observations\"] = list(observations)\n\n            # 调用 stepper（通常是 Reviewer.agent_step）让模型做决策\n            action = stepper(state)\n            # 解析模型选择的动作类型\n            kind = str(action.get(\"action\", \"\")).strip().lower()\n\n            if kind == \"final\":\n                # 模型认为信息足够，返回最终结论（findings）\n                return AgentLoopResult(action.get(\"findings\"), step, observations, \"final\")\n            if kind != \"tool\":\n                # 既不是 final 也不是 tool → 协议错误\n                raise AgentLoopProtocolError(\"unsupported agent loop action: %s\" % kind)\n\n            # 执行工具调用：模型请求使用某个工具\n            tool_name = str(action.get(\"tool\", \"\")).strip()\n            # 初始化字典 arguments，用于存储键值对数据\n            arguments = action.get(\"arguments\") or {}\n            try:\n                # 两种工具调用方式：ToolRegistry（带校验）或普通字典\n                if isinstance(tools, ToolRegistry):\n                    value = tools.invoke(tool_name, arguments)  # 带 Schema 校验（更安全）\n                else:\n                    value = tools[tool_name](**arguments)  # 直接调用（无校验）\n                # 将工具结果渲染为字符串（JSON 序列化或 str()）\n                rendered = (json.dumps(value, ensure_ascii=False, sort_keys=True)\n                           if isinstance(value, (dict, list)) else str(value))\n                # 构造观察记录：工具名+结果（截断到最大字符数）\n                observation = {\"step\": step, \"tool\": tool_name, \"ok\": True,\n                               \"result\": rendered[:self.max_observation_chars]}\n            except Exception as exc:\n                # 工具调用失败也要记录（不中断循环，让模型在下一步调整策略）\n                observation = {\"step\": step, \"tool\": tool_name, \"ok\": False,\n                               \"error\": str(exc)[:1000]}\n            # 将观察追加到列表，下一轮会反馈给模型\n            observations.append(observation)\n\n        # 所有步骤用完仍未返回 final → 步骤预算耗尽\n        raise RuntimeBudgetExceeded(\"agent loop step budget exceeded\")",
+                "caption": "AgentLoop.run()：有界模型/工具循环"
+              }
+            },
+            {
+              "type": "text",
+              "text": "ToolRegistry 是 AgentLoop 的安全门。它对每次工具调用执行 JSON Schema 校验：检查必填参数、类型匹配、值范围限制。这防止 LLM 产生格式错误的工具调用，也防止恶意输入通过工具参数注入。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# ToolRegistry：工具注册表——AgentLoop 的安全门\n# 对每次工具调用执行四层校验，防止 LLM 产生格式错误或恶意的工具参数\n# ToolRegistry：核心类，封装了系统的关键行为和状态\nclass ToolRegistry:\n    @staticmethod\n    # _validate：内部辅助方法，供类内部其他方法调用\n    def _validate(schema, arguments):\n        # 第 1 层：必填参数检查——缺少 required 中的任何参数都报错\n        missing = required.difference(arguments)\n        if missing: raise AgentLoopProtocolError(\"missing required tool arguments: ...\")\n        # 第 2 层：额外参数检查——当 additionalProperties=false 时，不允许未声明的参数\n        # 初始化集合 unknown，用于去重和快速查找\n        unknown = set(arguments).difference(properties)\n        if unknown: raise AgentLoopProtocolError(\"unknown tool arguments: ...\")\n        # 第 3 层：类型检查——确保每个参数类型与 schema 声明一致\n        # 支持 string/integer/number/boolean/object/array 六种 JSON 类型\n        for key, value in arguments.items():\n            expected = expected_types.get(spec.get(\"type\"))\n            if expected and not isinstance(value, expected):\n                raise AgentLoopProtocolError(\"tool argument %s must be %s\" % ...)\n        # 第 4 层：范围检查——数值类型可设置 minimum/maximum 约束\n        if \"minimum\" in spec and value < spec[\"minimum\"]: raise ...\n        if \"maximum\" in spec and value > spec[\"maximum\"]: raise ...",
+                "caption": "ToolRegistry._validate()：四层参数校验"
+              }
+            }
+          ]
+        },
+        {
+          "title": "ReviewHarness：审查工作流状态机",
+          "anchor": "practice-runtime-harness",
+          "groupTitle": "Agent 运行时模块",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 15,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "ReviewHarness 将 AgentRuntime 应用到审查场景。它定义了 3 个节点（planning → executing → reviewing）和严格的状态转换规则。每个节点完成后 checkpoint 被持久化，任务中断后可以从最后一个成功的节点恢复。"
+            },
+            {
+              "type": "callchain",
+              "callchain": {
+                "endpoint": "ReviewHarness.run(task_id, repository, pr, diff, tenant_id)",
+                "steps": [
+                  {
+                    "layer": "入口",
+                    "component": "ReviewHarness.run",
+                    "file": "harness.py",
+                    "description": "检查缓存结果 → 加载 checkpoint → 构建 RuntimeState → 调用 AgentRuntime.execute()"
+                  },
+                  {
+                    "layer": "节点1",
+                    "component": "_planning",
+                    "file": "harness.py",
+                    "description": "parse_unified_diff(diff) → 验证有新增行 → 状态转换到 PLANNING → 返回序列化 parsed"
+                  },
+                  {
+                    "layer": "节点2",
+                    "component": "_executing",
+                    "file": "harness.py",
+                    "description": "反序列化 parsed → 调用 reviewer.review_with_context() 或 reviewer.review() → 返回 findings"
+                  },
+                  {
+                    "layer": "节点3",
+                    "component": "_reviewing",
+                    "file": "harness.py",
+                    "description": "反序列化 findings → 计算风险等级 → 构建 ReviewReport → 返回报告 dict"
+                  },
+                  {
+                    "layer": "完成",
+                    "component": "store.succeed",
+                    "file": "store.py",
+                    "description": "保存报告 → 记录 SUCCESS trace event → 返回 ReviewReport"
+                  }
+                ]
+              }
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# 状态转换规则——硬编码的有限状态机\n# 为什么硬编码而不是写在 prompt 里？因为代码约束比 LLM 指令更可靠\n# LLM 可能「忘记」规则或产生绕过，但代码层面的检查无法被绕过\nALLOWED = {\n    # 每个状态只能迁移到指定的目标状态集合\n    TaskState.PENDING:   {TaskState.PLANNING, TaskState.FAILED, TaskState.CANCELLED},\n    TaskState.PLANNING:  {TaskState.EXECUTING, TaskState.FAILED, TaskState.CANCELLED},\n    TaskState.EXECUTING: {TaskState.REVIEWING, TaskState.FAILED, TaskState.CANCELLED},\n    TaskState.REVIEWING: {TaskState.SUCCESS, TaskState.FAILED, TaskState.CANCELLED},\n}\n\n# _transition()：执行状态迁移的核心方法\n# _transition：内部辅助方法，供类内部其他方法调用\ndef _transition(self, target, message):\n    # 幂等检查：如果目标状态等于当前状态，直接返回（不报错）\n    # 这允许外部安全地重复调用 transition(SUCCESS) 而不会出问题\n    if target == self._ctx.state: return  # 幂等\n    # 合法性检查：目标状态必须在 ALLOWED 表的允许集合中\n    if target not in ALLOWED.get(self._ctx.state, set()):\n        raise RuntimeError(\"invalid state transition: %s -> %s\" % ...)\n    # 通过检查 → 执行迁移\n    self._ctx.step += 1  # 步骤计数器递增\n    self._ctx.state = target  # 更新当前状态\n    # 持久化迁移记录：创建 TraceEvent 写入数据库（用于事后审计和调试）\n    self.store.transition(self._ctx.task_id, TraceEvent(...))",
+                "caption": "状态机转换：严格的前向状态流 + 失败/取消旁路"
+              }
+            }
+          ]
+        },
+        {
+          "title": "自研运行时的设计选择",
+          "anchor": "practice-runtime-design-choice",
+          "groupTitle": "Agent 运行时模块",
+          "difficulty": "advanced",
+          "estimatedMinutes": 8,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "项目选择了**完全自研运行时**，而非使用 LangChain、AutoGen、LangGraph 等第三方框架。这个决策基于三个关键需求：(1) 持久化 checkpoint 支持断点续跑；(2) 严格的步骤和时间预算控制；(3) 任务取消检查。现有框架很难同时满足这三点，或者会引入大量不必要的依赖。"
+            },
+            {
+              "type": "text",
+              "text": "自研的 AgentRuntime 实现了完整的节点编排、checkpoint 持久化、预算控制和重试策略。AgentLoop 实现了经典的 ReAct 模式（模型/工具循环）。两者组合起来，ReviewHarness 可以定义任意节点图（如 planning → executing → reviewing），MultiAgentCoordinator 可以定义更复杂的 6 节点协作协议。"
+            },
+            {
+              "type": "text",
+              "text": "需要注意，Harness 的 checkpoint 粒度是外层节点，不是每一条 agent 消息。内层消息会实时写入任务记录，但一个 specialist 中途退出时，恢复粒度仍然是重新执行尚未完成的外层 executing 节点。"
+            },
+            {
+              "type": "text",
+              "text": "**什么是 TypedDict？** TypedDict 是 Python 的一种字典类型——它和普通字典（`dict`）用法一样，但额外声明了每个键的类型。就像表格模板：`{\"name\": str, \"age\": int}` 表示这个字典必须有字符串类型的 name 和整数类型的 age。项目用 TypedDict 定义 CollaborationState（协作状态）和 RuntimeState（运行时状态），让开发者清楚知道状态里有哪些字段、每个字段是什么类型。"
+            }
+          ]
+        },
+        {
+          "title": "RuntimeState 与双重状态语义",
+          "anchor": "practice-runtime-state",
+          "groupTitle": "Agent 运行时模块",
+          "difficulty": "advanced",
+          "estimatedMinutes": 10,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "ReviewHarness 内部有两个层面的状态不能混淆：(1) RuntimeState 是本次调用过程中的内存状态，保存节点之间传递的业务数据（解析后的 diff、Finding、报告）；(2) Store 保存任务的业务状态、trace 和 checkpoint，用来支持重试、恢复和查询。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# RuntimeState 结构（TypedDict）：节点间传递的内存状态\n# TypedDict 声明字典的键类型，让开发者清楚知道状态里有哪些字段\n# 注意：这不是数据库持久化状态，而是单次执行过程中的内存数据\n{\n    \"task_id\": str,           # 任务 ID——全局唯一标识\n    \"repository\": str,        # 仓库名（如 'acme/api-service'）\n    \"pull_request\": int | None, # PR 编号（直接 API 调用时为 None）\n    \"diff\": str,              # 原始 unified diff 文本\n    \"parsed\": {               # planning 节点的输出：解析后的结构化数据\n        \"files\": [...],       # 变更文件路径列表\n        \"added_lines\": [      # 新增行列表（所有审查器的输入）\n            {\"path\": \"...\", \"line\": 1, \"content\": \"...\"}\n        ]\n    },\n    \"findings\": [...],        # executing 节点的输出：审查发现的 Finding 列表\n    \"report\": {...}           # reviewing 节点的输出：最终审查报告\n}",
+                "caption": "RuntimeState：节点间传递的内存状态"
+              }
+            },
+            {
+              "type": "text",
+              "text": "checkpoint 是跨调用、跨 Worker 的持久状态。恢复不是从上次 Python 函数调用的内存栈继续，粒度是节点。例如 planning 已完成、executing 失败、reviewing 未执行，下次 resume 时：planning 读取 checkpoint 直接返回，executing 重新执行，reviewing 使用新 findings 继续。"
+            }
+          ]
+        },
+        {
+          "title": "三个节点各自做什么",
+          "anchor": "practice-runtime-nodes",
+          "groupTitle": "Agent 运行时模块",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 15,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "planning 节点：调用 parse_unified_diff()，校验输入至少包含文件或新增行。解析器读取 +++ b/path 得到文件路径，读取 hunk 头部得到新文件行号，只收集新增行。通过校验后迁移到 PLANNING，并把 ParsedDiff 序列化为 JSON 兼容字典。"
+            },
+            {
+              "type": "text",
+              "text": "executing 节点：先从 state['parsed'] 还原 ParsedDiff，再检查 Reviewer 是否提供 review_with_context。普通 Reviewer 使用 review(diff, parsed)，MultiAgentCoordinator 使用 review_with_context(task_id, diff, parsed)，因此可以把 agent 消息持久化到当前任务。节点成功后把 Finding 保存为字典列表。"
+            },
+            {
+              "type": "text",
+              "text": "reviewing 节点：不再调用底层规则或模型。它还原 Finding，计算整体风险（存在 critical/high → high，否则 medium → medium，否则 low），生成协作摘要（优先从内存读取，进程重启后从持久化消息重建），最后创建 ReviewReport。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# reviewing 节点的核心逻辑：风险计算 + 报告生成\n# 风险等级由 findings 中最严重的级别决定\n\n# 风险计算逻辑：从 findings 集合中提取所有严重级别\n# _risk：内部辅助方法，供类内部其他方法调用\ndef _risk(findings):\n    severities = {f.severity for f in findings}  # 集合去重，获取所有出现过的级别\n    # 存在 CRITICAL 或 HIGH → 整体风险为 high（需要立即关注）\n    if Severity.CRITICAL in severities or Severity.HIGH in severities:\n        return \"high\"\n    # 只有 MEDIUM → 整体风险为 medium（建议修复）\n    if Severity.MEDIUM in severities:\n        return \"medium\"\n    # 只有 LOW 或没有 findings → 整体风险为 low\n    return \"low\"\n\n# ReviewReport 结构：一次审查的完整报告\n# 这是系统最终输出给开发者/GitHub PR 的数据结构\nReviewReport(\n    repository=repository,           # 仓库名\n    pull_request=pull_request,       # PR 编号（可为 None）\n    # 摘要：一句话概括审查结果\n    summary=\"Reviewed N file(s); found M actionable issue(s). Overall risk: high.\",\n    risk=risk,                       # 整体风险等级（high/medium/low）\n    findings=findings,               # 所有 Finding 列表\n    files_reviewed=parsed.files,     # 审查的文件列表\n    reviewer=reviewer.name,          # 审查器名称（如 'multi-agent-coordinator'）\n    collaboration=collaboration,     # 多 Agent 协作摘要（Critic/Verifier 的决策记录）\n)",
+                "caption": "reviewing 节点：风险计算与报告生成"
+              }
+            }
+          ]
+        },
+        {
+          "title": "两层重试层次与预算控制",
+          "anchor": "practice-runtime-retry-layers",
+          "groupTitle": "Agent 运行时模块",
+          "difficulty": "advanced",
+          "estimatedMinutes": 12,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "系统有两层容易混淆的重试机制：(1) Agent 层重试（agent_retries）只处理一个 specialist 的调用；(2) Harness 节点重试（node_retries）可能重新进入整个 executing 节点，因此会重新运行协调器。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "text",
+                "content": "# ===== 系统有三层独立的重试机制，每层解决不同层面的失败问题 =====\n# 第一层：Agent 层重试（最内层）——处理单个 Specialist 的调用失败\n# 第二层：Harness 节点层重试（中间层）——处理整个 executing 节点的失败\n# 第三层：队列重试（最外层）——处理 Worker 投递或基础设施层失败\n\n# --- 第一层：Agent 层重试 ---\nAgent 调用失败  # 某个 Specialist Agent（如 security-agent）执行出错\n→ Agent 层重试（agent_retries=1，最多 2 次尝试）  # 同一 Agent 再试一次\n→ Planner 选择替代 Agent（replan）  # 如果重试仍失败，Planner 选一个领域重叠的替代 Agent 接管\n→ 协调器仍失败  # 所有 Agent 都失败，整个 MultiAgentCoordinator 返回失败\n\n# --- 第二层：Harness 节点层重试 ---\n→ ReviewHarness 节点层重试（node_retries=2，最多 3 次尝试）  # 重新进入整个 executing 节点\n→ 节点仍失败  # 3 次节点重试全部耗尽\n→ 任务 FAILED  # 任务标记为失败，写入 trace_events\n\n# --- 第三层：队列重试（独立于 Harness） ---\n# 队列重试解决的是 Worker 进程崩溃或网络中断等基础设施问题\n→ TaskQueue max_attempts=3  # 消息最多被投递 3 次\n→ 解决 Worker 投递或基础设施层失败  # 如 Worker 进程 OOM、网络断开等\n→ 与 Harness 节点重试不能互相替代  # 两者独立存在，各管各的层面",
+                "caption": "三层恢复机制"
+              }
+            },
+            {
+              "type": "text",
+              "text": "预算检查条件：step >= max_steps 或 time.monotonic() - started > timeout_seconds。检查发生在节点尝试开始前和状态迁移前。它不是操作系统级的硬超时——某个 Reviewer 在函数内部长时间阻塞时，Harness 不能主动杀掉它。取消也是协作式的：cancel_task() 只设置 cancel_requested 标志，在下一个预算检查点才被发现。"
+            },
+            {
+              "type": "text",
+              "text": "不可重试异常：ValueError（diff 无效）、RuntimeCancelled、RuntimeBudgetExceeded 直接穿透重试循环。成功任务有幂等行为：如果任务已 SUCCESS 且有报告，Harness 直接返回已保存报告，不重新调用 Reviewer。"
+            }
+          ]
+        },
+        {
+          "title": "案例实战：PR #42 的三节点执行流程",
+          "anchor": "practice-runtime-case-study",
+          "groupTitle": "Agent 运行时模块",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 10,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "让我们跟踪 PR #42 的 deploy.py diff 在 ReviewHarness 中的完整执行流程。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "text",
+                "content": "# ===== ReviewHarness.run() 的完整执行过程 =====\n# 入口参数：task_id=任务ID, repository=仓库名, pr=PR编号, diff=变更内容, tenant_id=租户\nReviewHarness.run(task_id, \"acme/api-service\", 42, diff, \"default\") 的完整执行过程：\n\n# ━━━ 节点 1: planning ━━ 负责解析 diff 并校验输入有效性 ━━━\n# 状态转换：PENDING → PLANNING（由状态机 ALLOWED 表控制，不可跳过）\n状态转换: PENDING → PLANNING\n操作:\n  1. parse_unified_diff(diff) → ParsedDiff  # 解析 unified diff 格式，提取文件列表和新增行\n     → ParsedDiff(files=[\"deploy.py\"], added_lines=[14 行])  # 解析结果：1 个文件，14 行新增\n  2. 验证：parsed.files 非空 ✓，parsed.added_lines 非空 ✓  # 确保 diff 包含有效变更\n  3. 序列化 parsed → state[\"parsed\"] = {\"files\": [...], \"added_lines\": [...]}  # 转为 JSON 兼容字典\n  4. checkpoint 持久化: save_checkpoint(task_id, \"planning\", state, \"completed\")  # 节点成功后立即保存快照\n\n# ━━━ 节点 2: executing ━━ 调用审查器执行实际代码审查 ━━━\n# 状态转换：PLANNING → EXECUTING\n状态转换: PLANNING → EXECUTING\n操作:\n  1. 从 state[\"parsed\"] 还原 ParsedDiff  # 从字典反序列化回 ParsedDiff 对象\n  2. 调用 MultiAgentCoordinator.review_with_context(task_id, diff, parsed)  # 启动多 Agent 协作审查\n     → 内部启动 6 节点协作协议（详见 08-多Agent 教程）  # planner→specialists→deliberation→evidence→verifier→arbiter\n     → Planner → Specialists(并行) → Critic → Evidence → Verifier → Arbiter  # 6 个角色依次执行\n     → 返回 5 个 Finding（SEC-HARDCODED-SECRET, SEC-SUBPROCESS-SHELL, ...）  # 通过所有门禁的 finding\n  3. state[\"findings\"] = [5 个 Finding dict]  # 将审查结果存入运行时状态\n  4. checkpoint 持久化: save_checkpoint(task_id, \"executing\", state, \"completed\")  # 节点成功后保存\n\n# ━━━ 节点 3: reviewing ━━ 汇总结果、计算风险、生成报告 ━━━\n# 状态转换：EXECUTING → REVIEWING → SUCCESS（两步迁移）\n状态转换: EXECUTING → REVIEWING → SUCCESS\n操作:\n  1. 从 state[\"findings\"] 还原 Finding 列表  # 从字典列表反序列化回 Finding 对象\n  2. 计算风险: severities = {HIGH, MEDIUM, LOW} → risk = \"high\"  # 存在 HIGH 级别 → 整体风险为 high\n  3. 生成协作摘要（从 CollaborationBus 读取持久化消息）  # 记录 Critic/Verifier 的决策过程\n  4. 构建 ReviewReport(repository, pull_request=42, risk=\"high\", findings=[5], ...)  # 组装最终报告\n  5. store.succeed(task_id, report, event) → 状态 SUCCESS  # 写入报告 + 记录 SUCCESS trace event\n\n# ━━━ 如果 executing 节点中途崩溃 ━━ checkpoint 断点续跑演示 ━━━\n恢复流程:\n  1. resume_task(task_id) → 加载 checkpoint  # 从数据库读取所有节点的 checkpoint\n  2. planning: status=completed → 直接从 checkpoint 恢复 state，不重新解析  # 跳过已完成的节点\n  3. executing: status=failed → 重新执行整个 executing 节点  # 失败的节点需要完整重跑\n  4. reviewing: 未执行 → 正常执行  # 从未执行的节点继续",
+                "caption": "PR #42 在 ReviewHarness 中的三节点执行流程 + checkpoint 恢复"
+              }
+            },
+            {
+              "type": "text",
+              "text": "注意几个关键细节：(1) planning 节点的 checkpoint 使得恢复时不需要重新解析 diff；(2) executing 节点调用的是 MultiAgentCoordinator，它内部的 6 个节点有自己的 checkpoint 粒度，但外层 Harness 只看到 executing 整体成功或失败；(3) reviewing 节点不调用任何审查器——它只负责汇总和格式化。→ 下一步：MultiAgentCoordinator 内部的 6 节点协作协议详见 08-多Agent 教程。"
+            }
+          ]
+        },
+        {
+          "title": "模块总结",
+          "anchor": "practice-runtime-summary",
+          "groupTitle": "Agent 运行时模块",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 5,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "运行时模块的三个组件各有明确职责：AgentRuntime 是通用节点编排器（不知道审查是什么），AgentLoop 是模型/工具循环引擎（不知道节点图是什么），ReviewHarness 将两者组合为审查工作流。关键设计原则：(1) 预算必须有限——步骤和时间双重控制；(2) 副作用必须持久化——每个节点完成后立即 checkpoint；(3) 失败必须可恢复——从 checkpoint 恢复而不是重头开始；(4) 取消必须响应——每个节点执行前检查取消标志。→ 延伸阅读：ReviewHarness 的 executing 节点调用的 MultiAgentCoordinator 详见 08-多Agent 教程；checkpoint 持久化到 TaskStore 详见 09-持久化教程。"
+            },
+            {
+              "type": "text",
+              "text": "运行时管理了任务的完整生命周期。但审查不是单线程执行——多个 Agent 如何协作完成一次审查？下一章的多 Agent 协作给出答案。"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
