@@ -265,6 +265,10 @@
             {
               "type": "text",
               "text": "小王看到审查报告后：(1) 修复了硬编码密钥，改为 os.environ[\"API_KEY\"]；(2) 认为第 4 条 print 是故意加的调试日志，标记为「误报」(false_positive)；(3) 接受了其他修复建议。系统的后续行为：(1) SafeFixer 在 evoagent/fix-pr-42-20260810... 分支上自动修复了 shell=True→False 和 print 调试输出（SafeFixer 只处理 3 种确定性高的规则，except Exception: pass 和 SQL 拼接超出其能力范围，需要人工修复）；(2) 误报反馈被记录，下次 EvolutionEngine.auto_propose() 会从中提取学习信号，让 LLM 减少类似的过度报告。这个闭环详见 12-进化教程。"
+            },
+            {
+              "type": "text",
+              "text": "---\n\n**系统全景和数据流转已经清晰。** 下一章从设计模式的角度审视整个项目，建立模块索引，为后续的深入阅读提供导航。"
             }
           ]
         }

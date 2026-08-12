@@ -12,12 +12,24 @@
           "estimatedMinutes": 8,
           "blocks": [
             {
+              "type": "diagram",
+              "diagram": {
+                "language": "mermaid",
+                "content": "graph TB\n    subgraph 接入层[\"🌐 接入层\"]\n        A[HTTP API<br/>api.py] --> B[GitHub Webhook<br/>github.py]\n    end\n    subgraph 服务编排层[\"⚙️ 服务编排层\"]\n        C[ReviewService<br/>service.py]\n    end\n    subgraph 运行时层[\"🔄 运行时层\"]\n        D[ReviewHarness<br/>harness.py]\n        E[AgentRuntime<br/>runtime.py]\n        F[AgentLoop<br/>runtime.py]\n    end\n    subgraph 审查层[\"⭐ 🔍 审查层\"]\n        G[MultiAgentCoordinator<br/>agents.py]\n        H[Reviewer 实现<br/>reviewer.py]\n        I[Skill Registry<br/>skills.py]\n    end\n    subgraph 持久化层[\"💾 持久化层\"]\n        J[TaskStore<br/>store.py / postgres_store.py]\n        K[TaskQueue<br/>task_queue.py]\n    end\n    subgraph 基础设施[\"🧠 基础设施\"]\n        L[ContextManager<br/>context_manager.py]\n        M[MemoryManager<br/>memory.py]\n        N[Observability<br/>observability.py]\n    end\n    A --> C\n    B --> C\n    C --> D\n    D --> E\n    E --> F\n    D --> G\n    G --> H\n    G --> I\n    C --> J\n    C --> K\n    G --> L\n    G --> M\n    D --> N",
+                "caption": "EvoAgent 系统架构 — 当前章节：审查层"
+              }
+            },
+            {
+              "type": "text",
+              "text": "> 📍 **当前位置**：本章讲解 审查层 的实现细节。参考架构图了解它在系统中的位置。"
+            },
+            {
               "type": "text",
               "text": "Skill 是用户自定义的审查规则。但用户提交的代码不可信——它可能包含恶意代码（import os; os.system('rm -rf /')）。skills.py（208行）+ skill_runner.py（55行）实现了三层隔离来确保安全。"
             },
             {
               "type": "text",
-              "text": "在深入代码之前，先理解几个核心概念：\n\n**什么是沙箱（Sandbox）？** 沙箱是一种安全机制，让程序在一个受限的环境中运行——就像把小孩放在沙坑里玩，他可以随意折腾，但出不了沙坑的范围。技术上的沙箱会限制程序能访问的文件、网络、内存和 CPU 等资源。\n\n**什么是进程和子进程？** 进程是操作系统中正在运行的一个程序实例。你在电脑上同时开着浏览器、编辑器和终端，每个都是独立的进程。子进程是你的程序「生」出来的另一个进程——就像公司（主进程）派一个员工（子进程）去独立完成任务。子进程有自己独立的内存空间，即使它崩溃了也不会影响主进程。项目用 subprocess.run() 创建子进程来运行 Skill，主进程和 Skill 之间完全隔离。\n\n**什么是 AST（抽象语法树）？** 在 05-diff-parser 教程中已详细解释。简单回顾：AST 把代码解析成树形结构，能理解代码的语法含义（比如区分 `import socket` 是导入语句而不是普通字符串）。项目用 AST 检查 Skill 代码里有没有 import 危险模块。\n\n**什么是 audit hook（审计钩子）？** audit hook 是 Python 3.8+ 提供的安全机制。你可以注册一个回调函数，每当 Python 执行某些敏感操作（打开文件、创建网络连接、启动子进程等）时，这个回调就会被触发。就像大楼的门禁系统——每次有人刷卡进门（触发事件），保安（audit hook）都会检查他的门禁卡是否有权限进入这个房间。项目的 skill_runner.py 用 sys.addaudithook() 拦截所有网络、子进程和文件操作。\n\n**什么是 Docker 容器？** Docker 是一种更高级的隔离技术。如果说子进程像是用隔板把办公室隔开，那 Docker 就像把程序放进一个完全密封的集装箱——集装箱里没有网络、文件系统是只读的、内存有上限。项目可选地用 Docker 运行 Skill，提供比子进程更强的隔离。"
+              "text": "在深入代码之前，先理解几个核心概念：\n\n**什么是沙箱（Sandbox）？** 沙箱是一种安全机制，让程序在一个受限的环境中运行——就像把小孩放在沙坑里玩，他可以随意折腾，但出不了沙坑的范围。技术上的沙箱会限制程序能访问的文件、网络、内存和 CPU 等资源。\n\n**什么是进程和子进程？** 进程是操作系统中正在运行的一个程序实例。你在电脑上同时开着浏览器、编辑器和终端，每个都是独立的进程。子进程是你的程序「生」出来的另一个进程——就像公司（主进程）派一个员工（子进程）去独立完成任务。子进程有自己独立的内存空间，即使它崩溃了也不会影响主进程。项目用 subprocess.run() 创建子进程来运行 Skill，主进程和 Skill 之间完全隔离。\n\n**什么是 AST（抽象语法树）？** 在 22-diff-parser 教程中已详细解释。简单回顾：AST 把代码解析成树形结构，能理解代码的语法含义（比如区分 `import socket` 是导入语句而不是普通字符串）。项目用 AST 检查 Skill 代码里有没有 import 危险模块。\n\n**什么是 audit hook（审计钩子）？** audit hook 是 Python 3.8+ 提供的安全机制。你可以注册一个回调函数，每当 Python 执行某些敏感操作（打开文件、创建网络连接、启动子进程等）时，这个回调就会被触发。就像大楼的门禁系统——每次有人刷卡进门（触发事件），保安（audit hook）都会检查他的门禁卡是否有权限进入这个房间。项目的 skill_runner.py 用 sys.addaudithook() 拦截所有网络、子进程和文件操作。\n\n**什么是 Docker 容器？** Docker 是一种更高级的隔离技术。如果说子进程像是用隔板把办公室隔开，那 Docker 就像把程序放进一个完全密封的集装箱——集装箱里没有网络、文件系统是只读的、内存有上限。项目可选地用 Docker 运行 Skill，提供比子进程更强的隔离。"
             }
           ]
         },

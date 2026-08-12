@@ -12,6 +12,18 @@
           "estimatedMinutes": 10,
           "blocks": [
             {
+              "type": "diagram",
+              "diagram": {
+                "language": "mermaid",
+                "content": "graph TB\n    subgraph 接入层[\"🌐 接入层\"]\n        A[HTTP API<br/>api.py] --> B[GitHub Webhook<br/>github.py]\n    end\n    subgraph 服务编排层[\"⚙️ 服务编排层\"]\n        C[ReviewService<br/>service.py]\n    end\n    subgraph 运行时层[\"⭐ 🔄 运行时层\"]\n        D[ReviewHarness<br/>harness.py]\n        E[AgentRuntime<br/>runtime.py]\n        F[AgentLoop<br/>runtime.py]\n    end\n    subgraph 审查层[\"🔍 审查层\"]\n        G[MultiAgentCoordinator<br/>agents.py]\n        H[Reviewer 实现<br/>reviewer.py]\n        I[Skill Registry<br/>skills.py]\n    end\n    subgraph 持久化层[\"💾 持久化层\"]\n        J[TaskStore<br/>store.py / postgres_store.py]\n        K[TaskQueue<br/>task_queue.py]\n    end\n    subgraph 基础设施[\"🧠 基础设施\"]\n        L[ContextManager<br/>context_manager.py]\n        M[MemoryManager<br/>memory.py]\n        N[Observability<br/>observability.py]\n    end\n    A --> C\n    B --> C\n    C --> D\n    D --> E\n    E --> F\n    D --> G\n    G --> H\n    G --> I\n    C --> J\n    C --> K\n    G --> L\n    G --> M\n    D --> N",
+                "caption": "EvoAgent 系统架构 — 当前章节：运行时层"
+              }
+            },
+            {
+              "type": "text",
+              "text": "> 📍 **当前位置**：本章讲解 运行时层 的实现细节。参考架构图了解它在系统中的位置。"
+            },
+            {
               "type": "text",
               "text": "EvoAgent 没有使用 LangChain、AutoGen 等现有 Agent 框架，而是自研了两个运行时组件：AgentRuntime（节点编排引擎）和 AgentLoop（模型/工具循环）。为什么？因为项目需要三个关键能力：(1) 持久化 checkpoint 支持断点续跑；(2) 严格的步骤和时间预算控制；(3) 任务取消检查。现有框架很难同时满足这三点。"
             },

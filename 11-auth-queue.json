@@ -12,6 +12,18 @@
           "estimatedMinutes": 8,
           "blocks": [
             {
+              "type": "diagram",
+              "diagram": {
+                "language": "mermaid",
+                "content": "graph TB\n    subgraph 接入层[\"🌐 接入层\"]\n        A[HTTP API<br/>api.py] --> B[GitHub Webhook<br/>github.py]\n    end\n    subgraph 服务编排层[\"⚙️ 服务编排层\"]\n        C[ReviewService<br/>service.py]\n    end\n    subgraph 运行时层[\"🔄 运行时层\"]\n        D[ReviewHarness<br/>harness.py]\n        E[AgentRuntime<br/>runtime.py]\n        F[AgentLoop<br/>runtime.py]\n    end\n    subgraph 审查层[\"🔍 审查层\"]\n        G[MultiAgentCoordinator<br/>agents.py]\n        H[Reviewer 实现<br/>reviewer.py]\n        I[Skill Registry<br/>skills.py]\n    end\n    subgraph 持久化层[\"💾 持久化层\"]\n        J[TaskStore<br/>store.py / postgres_store.py]\n        K[TaskQueue<br/>task_queue.py]\n    end\n    subgraph 基础设施[\"⭐ 🧠 基础设施\"]\n        L[ContextManager<br/>context_manager.py]\n        M[MemoryManager<br/>memory.py]\n        N[Observability<br/>observability.py]\n    end\n    A --> C\n    B --> C\n    C --> D\n    D --> E\n    E --> F\n    D --> G\n    G --> H\n    G --> I\n    C --> J\n    C --> K\n    G --> L\n    G --> M\n    D --> N",
+                "caption": "EvoAgent 系统架构 — 当前章节：基础设施"
+              }
+            },
+            {
+              "type": "text",
+              "text": "> 📍 **当前位置**：本章讲解 基础设施 的实现细节。参考架构图了解它在系统中的位置。"
+            },
+            {
               "type": "text",
               "text": "auth.py 实现了完整的认证授权体系：PBKDF2 密码哈希 + 自签 JWT + RBAC 权限模型。task_queue.py 实现了双模任务队列：Redis Streams（生产）/ 内存队列（开发），支持 ACK、租约、指数退避重试和死信队列。"
             },
@@ -76,6 +88,10 @@
                 "content": "# ===== RBAC 权限模型：角色→权限映射 =====\n# ROLE_PERMISSIONS 定义了三种角色各自拥有的权限集合\n# 使用 set（集合）存储权限，查找时间复杂度 O(1)\n# 设计原则：权限检查通过角色间接完成，不直接给用户分配权限\nROLE_PERMISSIONS = {\n    \"admin\":      {\"read\", \"review\", \"fix\", \"manage\", \"audit\"},  # 全部权限\n    \"maintainer\": {\"read\", \"review\", \"fix\"},                      # 审查 + 修复\n    \"auditor\":    {\"read\", \"audit\"},                               # 只读 + 审计\n}\n\n# Principal：当前请求者的身份对象，贯穿整个请求生命周期\n# frozen=True 保证身份在请求处理过程中不会被意外修改\n@dataclass(frozen=True)\n# Principal：数据类，自动初始化字段并生成构造函数\nclass Principal:\n    user_id: str       # 用户唯一标识\n    username: str      # 用户名（用于日志和展示）\n    tenant_id: str     # 租户隔离：确保用户只能访问自己租户的数据\n    role: str          # 用户角色：决定可用权限集合\n\n    # can：检查当前角色是否拥有指定权限\n    # 如果角色不存在于 ROLE_PERMISSIONS 中，返回空集合（无任何权限）\n    # can：公开方法，实现核心业务逻辑\n    def can(self, permission):\n        return permission in ROLE_PERMISSIONS.get(self.role, set())\n\n# ===== API 中的使用方式 =====\n# _principal(\"review\") 从 JWT 中提取身份，并检查是否拥有 review 权限\nprincipal = self._principal(\"review\")  # 要求 review 权限\n# 如果角色没有 manage 权限 → 返回 403 Forbidden\nif not principal.can(\"manage\"):        # 检查 manage 权限\n    self._send_json(403, {\"error\": \"permission denied\"})",
                 "caption": "RBAC：角色→权限映射 + 租户隔离"
               }
+            },
+            {
+              "type": "text",
+              "text": "### FastAPI 对照实现\n\n```python\nfrom fastapi import FastAPI, Depends, HTTPException, Request\nfrom fastapi.responses import JSONResponse\n\napp = FastAPI()\n\n# 认证依赖：替代标准库中的 self._principal()\n# 对比：标准库在 do_GET 内部调用 self._principal() 解析 JWT\n# FastAPI 通过 Depends 自动注入，路由函数无需关心认证细节\nasync def get_current_principal(request: Request) -> Principal:\n    token = request.headers.get(\"Authorization\", \"\").removeprefix(\"Bearer \")\n    payload = AuthManager().authenticate(token)  # 验证 JWT 签名 + 过期\n    return Principal(**payload)\n\n# 权限检查依赖：替代标准库中的 principal.can() + self._send_json(403, ...)\ndef require_permission(permission: str):\n    def checker(principal: Principal = Depends(get_current_principal)):\n        if not principal.can(permission):\n            # 对比标准库：self._send_json(403, {\"error\": \"permission denied\"})\n            raise HTTPException(status_code=403, detail=\"permission denied\")\n        return principal\n    return checker\n\n# 路由函数：声明式权限，无需手动 if/else 检查\n@app.get(\"/v1/tasks/{task_id}\")\nasync def get_task(\n    task_id: str,\n    principal: Principal = Depends(require_permission(\"read\")),\n):\n    # 对比标准库：if self.path.startswith('/v1/tasks/') + self._principal('read') + self._send_json(200, data)\n    task = store.get_task(task_id, tenant_id=principal.tenant_id)\n    return task  # 自动 JSON 序列化 + 200 状态码\n```\n\n**对比要点**：\n- **认证依赖**：`Depends(get_current_principal)` 自动注入 vs `self._principal()` 手动调用\n- **权限检查**：`Depends(require_permission(\"read\"))` 声明式 vs `if not principal.can(\"manage\"): self._send_json(403, ...)` 手动检查\n- **路由参数**：`task_id: str` 自动解析路径参数 vs `self.path` 手动 split 提取\n- **错误响应**：`raise HTTPException(403)` vs `self._send_json(403, {...})`\n- **租户隔离**：两种方式相同，都在查询时传入 `tenant_id` 过滤"
             }
           ]
         },

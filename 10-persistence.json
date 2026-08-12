@@ -12,6 +12,18 @@
           "estimatedMinutes": 10,
           "blocks": [
             {
+              "type": "diagram",
+              "diagram": {
+                "language": "mermaid",
+                "content": "graph TB\n    subgraph 接入层[\"🌐 接入层\"]\n        A[HTTP API<br/>api.py] --> B[GitHub Webhook<br/>github.py]\n    end\n    subgraph 服务编排层[\"⚙️ 服务编排层\"]\n        C[ReviewService<br/>service.py]\n    end\n    subgraph 运行时层[\"🔄 运行时层\"]\n        D[ReviewHarness<br/>harness.py]\n        E[AgentRuntime<br/>runtime.py]\n        F[AgentLoop<br/>runtime.py]\n    end\n    subgraph 审查层[\"🔍 审查层\"]\n        G[MultiAgentCoordinator<br/>agents.py]\n        H[Reviewer 实现<br/>reviewer.py]\n        I[Skill Registry<br/>skills.py]\n    end\n    subgraph 持久化层[\"⭐ 💾 持久化层\"]\n        J[TaskStore<br/>store.py / postgres_store.py]\n        K[TaskQueue<br/>task_queue.py]\n    end\n    subgraph 基础设施[\"🧠 基础设施\"]\n        L[ContextManager<br/>context_manager.py]\n        M[MemoryManager<br/>memory.py]\n        N[Observability<br/>observability.py]\n    end\n    A --> C\n    B --> C\n    C --> D\n    D --> E\n    E --> F\n    D --> G\n    G --> H\n    G --> I\n    C --> J\n    C --> K\n    G --> L\n    G --> M\n    D --> N",
+                "caption": "EvoAgent 系统架构 — 当前章节：持久化层"
+              }
+            },
+            {
+              "type": "text",
+              "text": "> 📍 **当前位置**：本章讲解 持久化层 的实现细节。参考架构图了解它在系统中的位置。"
+            },
+            {
               "type": "text",
               "text": "EvoAgent 的持久化层有两个完全对等的实现：TaskStore（SQLite，1204行）和 PostgresTaskStore（PostgreSQL，932行）。它们实现了完全相同的公开 API，通过 create_store() 工厂函数根据 database_url 透明切换。这种设计让开发者可以零配置启动（SQLite），生产环境无缝切换到 PostgreSQL。"
             },
@@ -159,6 +171,10 @@
                 "content": "# claim_webhook：实现 Webhook 幂等性的核心方法\n# GitHub 可能重复投递同一个 Webhook（网络重试、手动重发），此方法确保同一个事件只被处理一次\n# 设计思路：利用 delivery_id 的唯一约束实现「首次插入成功，重复插入走冲突检测」\ndef claim_webhook(self, delivery_id, tenant_id, event_type, payload_sha256):\n    # 防御性检查：delivery_id 是 GitHub 在 HTTP Header 中提供的唯一标识\n    # 如果缺失则拒绝处理，因为没有它就无法保证幂等性\n    if not delivery_id:\n        raise ValueError(\"X-GitHub-Delivery is required\")\n    # 在锁保护下执行，防止并发插入同一个 delivery_id\n    with self._lock, self._connect() as conn:\n        try:\n            # 尝试插入新的 Webhook 记录\n            # webhook_deliveries 表的 delivery_id 列有 UNIQUE 约束\n            # 首次投递 → INSERT 成功 → 返回 True，表示「认领」了这个 Webhook\n            conn.execute(\"INSERT INTO webhook_deliveries(...) VALUES (...)\",\n                        (delivery_id, tenant_id, event_type, payload_sha256, utc_now()))\n            return True  # 首次投递，成功认领\n        except sqlite3.IntegrityError:\n            # INSERT 失败 → delivery_id 已存在 → 可能是重复投递\n            # 此时不能简单忽略，需要检查 payload 是否一致\n            row = conn.execute(\n                # 查询已存在的记录的 payload 哈希值\n                \"SELECT payload_sha256 FROM webhook_deliveries WHERE delivery_id=?\",\n                (delivery_id,)\n            ).fetchone()\n            # 如果 payload 哈希不同 → 同一个 delivery_id 携带了不同内容 → 异常情况\n            # 这可能是 GitHub 的 bug 或恶意请求，必须抛出异常让上层处理\n            if row and row[\"payload_sha256\"] != payload_sha256:\n                raise ValueError(\"delivery id was already used with a different payload\")\n            # payload 完全相同 → 正常的重复投递 → 静默返回 False\n            # 上层收到 False 后跳过处理，避免同一个 PR 事件被审查两次\n            return False  # 完全相同的重复投递，静默去重",
                 "caption": "Webhook 幂等：delivery_id 唯一约束 + SHA-256 冲突检测"
               }
+            },
+            {
+              "type": "text",
+              "text": "### FastAPI 对照实现\n\nclaim_webhook 是数据库层方法。在 FastAPI 端点中，它被 Webhook 路由调用——FastAPI 负责 HTTP 层（签名验证、请求解析），claim_webhook 负责幂等去重：\n\n```python\nfrom fastapi import FastAPI, Request, HTTPException, Depends\nfrom fastapi.responses import JSONResponse\n\napp = FastAPI()\n\n# ── Webhook 端点：调用 claim_webhook 实现幂等 ──\n# 对比：do_POST 中 if path == \"/webhooks/github\" → @app.post 装饰器\n# 对比：self._read_body() → await request.body()\n# 对比：self._send_json(202, result) → JSONResponse(result)\n@app.post(\"/webhooks/github\")\nasync def github_webhook(request: Request):\n    body = await request.body()\n    # 签名验证（对比：self._principal() → Depends 依赖）\n    signature = request.headers.get(\"X-Hub-Signature-256\", \"\")\n    if not verify_signature(secret, body, signature):\n        raise HTTPException(status_code=401, detail=\"invalid webhook signature\")\n\n    # 对比：self._read_json(body) → await request.json()\n    payload = await request.json()\n    delivery_id = request.headers.get(\"X-GitHub-Delivery\", \"\")\n    digest = hashlib.sha256(body).hexdigest()\n\n    # ── 核心：claim_webhook 保证幂等 ──\n    # 首次投递 → True（处理），重复投递 → False（跳过）\n    # 数据库层逻辑不变：delivery_id UNIQUE 约束 + SHA-256 冲突检测\n    claimed = store.claim_webhook(delivery_id, tenant_id, \"pull_request\", digest)\n    if not claimed:\n        return JSONResponse(content={\"ignored\": True, \"reason\": \"duplicate delivery\"})\n\n    result = service.handle_github_pull_request(payload, delivery_id, digest)\n    return JSONResponse(content=result, status_code=202)\n```\n\n**对比要点**：\n- 路由声明：`@app.post(\"/webhooks/github\")` 替代 `do_POST` 中 `if path == \"/webhooks/github\"`\n- 请求体解析：`await request.json()` 替代 `self._read_json(self._read_body())`\n- 响应返回：`JSONResponse(content=result, status_code=202)` 替代 `self._send_json(202, result)`\n- 认证依赖：签名验证封装为 `Depends()` 依赖，替代 `self._principal()` 内联调用\n- 数据库操作：`store.claim_webhook()` 逻辑完全不变——FastAPI 只替代了 HTTP 层"
             }
           ]
         },

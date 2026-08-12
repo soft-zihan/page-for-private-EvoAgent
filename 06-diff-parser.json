@@ -12,12 +12,24 @@
           "estimatedMinutes": 8,
           "blocks": [
             {
+              "type": "diagram",
+              "diagram": {
+                "language": "mermaid",
+                "content": "graph TB\n    subgraph 接入层[\"🌐 接入层\"]\n        A[HTTP API<br/>api.py] --> B[GitHub Webhook<br/>github.py]\n    end\n    subgraph 服务编排层[\"⚙️ 服务编排层\"]\n        C[ReviewService<br/>service.py]\n    end\n    subgraph 运行时层[\"🔄 运行时层\"]\n        D[ReviewHarness<br/>harness.py]\n        E[AgentRuntime<br/>runtime.py]\n        F[AgentLoop<br/>runtime.py]\n    end\n    subgraph 审查层[\"⭐ 🔍 审查层\"]\n        G[MultiAgentCoordinator<br/>agents.py]\n        H[Reviewer 实现<br/>reviewer.py]\n        I[Skill Registry<br/>skills.py]\n    end\n    subgraph 持久化层[\"💾 持久化层\"]\n        J[TaskStore<br/>store.py / postgres_store.py]\n        K[TaskQueue<br/>task_queue.py]\n    end\n    subgraph 基础设施[\"🧠 基础设施\"]\n        L[ContextManager<br/>context_manager.py]\n        M[MemoryManager<br/>memory.py]\n        N[Observability<br/>observability.py]\n    end\n    A --> C\n    B --> C\n    C --> D\n    D --> E\n    E --> F\n    D --> G\n    G --> H\n    G --> I\n    C --> J\n    C --> K\n    G --> L\n    G --> M\n    D --> N",
+                "caption": "EvoAgent 系统架构 — 当前章节：审查层"
+              }
+            },
+            {
+              "type": "text",
+              "text": "> 📍 **当前位置**：本章讲解 审查层 的实现细节。参考架构图了解它在系统中的位置。"
+            },
+            {
               "type": "text",
               "text": "EvoAgent 的所有审查都从 unified diff 开始。Unified diff 是 git diff 的默认输出格式，它只记录文件的变更部分（hunk），而不是完整文件内容。理解这个格式是理解整个审查流程的前提。"
             },
             {
               "type": "text",
-              "text": "在深入代码之前，先理解两个核心概念：\n\n**什么是正则表达式？** 正则表达式（Regular Expression，简称 regex）是一种用特殊语法描述文本模式的「微型语言」。比如 `\\bshell\\s*=\\s*True\\b` 的意思是：匹配 `shell=True`、`shell = True` 等变体——`\\b` 表示单词边界（防止匹配到 `shell=TrueMode`），`\\s*` 表示零个或多个空格。正则表达式就像超级版的 Ctrl+F——不是搜索固定字符串，而是搜索符合某种模式的字符串。项目用它来快速定位 diff 中的危险代码模式。\n\n**什么是 AST（抽象语法树）？** AST（Abstract Syntax Tree，抽象语法树）是把代码解析成树形数据结构的过程。就像把句子「小明吃了苹果」拆分成语法结构：主语（小明）→ 谓语（吃了）→ 宾语（苹果）。代码 `eval(user_input)` 的 AST 是：函数调用（eval, 参数=user_input）。正则表达式只能做字符串匹配，无法理解代码结构——比如它无法区分 `eval(x)` 和注释中的 `# eval(x)`。AST 可以。但 AST 解析更复杂，项目只在自动修复模块（15-auto-fix）中使用。"
+              "text": "在深入代码之前，先理解两个核心概念：\n\n**什么是正则表达式？** 正则表达式（Regular Expression，简称 regex）是一种用特殊语法描述文本模式的「微型语言」。比如 `\\bshell\\s*=\\s*True\\b` 的意思是：匹配 `shell=True`、`shell = True` 等变体——`\\b` 表示单词边界（防止匹配到 `shell=TrueMode`），`\\s*` 表示零个或多个空格。正则表达式就像超级版的 Ctrl+F——不是搜索固定字符串，而是搜索符合某种模式的字符串。项目用它来快速定位 diff 中的危险代码模式。\n\n**什么是 AST（抽象语法树）？** AST（Abstract Syntax Tree，抽象语法树）是把代码解析成树形数据结构的过程。就像把句子「小明吃了苹果」拆分成语法结构：主语（小明）→ 谓语（吃了）→ 宾语（苹果）。代码 `eval(user_input)` 的 AST 是：函数调用（eval, 参数=user_input）。正则表达式只能做字符串匹配，无法理解代码结构——比如它无法区分 `eval(x)` 和注释中的 `# eval(x)`。AST 可以。但 AST 解析更复杂，项目只在自动修复模块（22-auto-fix）中使用。"
             },
             {
               "type": "text",

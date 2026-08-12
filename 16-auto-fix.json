@@ -12,6 +12,18 @@
           "estimatedMinutes": 8,
           "blocks": [
             {
+              "type": "diagram",
+              "diagram": {
+                "language": "mermaid",
+                "content": "graph TB\n    subgraph 接入层[\"🌐 接入层\"]\n        A[HTTP API<br/>api.py] --> B[GitHub Webhook<br/>github.py]\n    end\n    subgraph 服务编排层[\"⚙️ 服务编排层\"]\n        C[ReviewService<br/>service.py]\n    end\n    subgraph 运行时层[\"🔄 运行时层\"]\n        D[ReviewHarness<br/>harness.py]\n        E[AgentRuntime<br/>runtime.py]\n        F[AgentLoop<br/>runtime.py]\n    end\n    subgraph 审查层[\"⭐ 🔍 审查层\"]\n        G[MultiAgentCoordinator<br/>agents.py]\n        H[Reviewer 实现<br/>reviewer.py]\n        I[Skill Registry<br/>skills.py]\n    end\n    subgraph 持久化层[\"💾 持久化层\"]\n        J[TaskStore<br/>store.py / postgres_store.py]\n        K[TaskQueue<br/>task_queue.py]\n    end\n    subgraph 基础设施[\"🧠 基础设施\"]\n        L[ContextManager<br/>context_manager.py]\n        M[MemoryManager<br/>memory.py]\n        N[Observability<br/>observability.py]\n    end\n    A --> C\n    B --> C\n    C --> D\n    D --> E\n    E --> F\n    D --> G\n    G --> H\n    G --> I\n    C --> J\n    C --> K\n    G --> L\n    G --> M\n    D --> N",
+                "caption": "EvoAgent 系统架构 — 当前章节：审查层"
+              }
+            },
+            {
+              "type": "text",
+              "text": "> 📍 **当前位置**：本章讲解 审查层 的实现细节。参考架构图了解它在系统中的位置。"
+            },
+            {
               "type": "text",
               "text": "自动修复是一个高风险功能——错误的修复可能引入新 bug。EvoAgent 的设计哲学是「保守修复」：只修复确定性高的问题（调试输出、shell=True、硬编码密钥），修复后必须通过编译和测试门禁，且结果提交到新分支而不是直接修改 PR。"
             },
@@ -21,7 +33,7 @@
             },
             {
               "type": "text",
-              "text": "在深入代码之前，先理解几个核心概念：\n\n**什么是 AST（抽象语法树）？** 在 05-diff-parser 教程中已详细解释。简单回顾：AST 把代码解析成树形结构，能理解代码的语法含义。正则表达式只能做字符串替换，可能误改注释或字符串中的内容；AST 能精确定位到语法元素（如关键字参数 `shell=True`）。项目的 SafeFixer 先用正则快速匹配，再用 AST 精确修复。\n\n**什么是路径遍历攻击？** 路径遍历攻击（Path Traversal Attack）是通过 `../` 序列逃出限定目录的攻击。比如限定只能读 `/data/` 下的文件，攻击者传入 `../../etc/passwd` 就能读到系统密码文件。项目的 RepairVerifier 用 `os.path.realpath()` 检查修复后的文件路径是否在允许的目录内，防止恶意 Skill 通过路径遍历修改系统文件。"
+              "text": "在深入代码之前，先理解几个核心概念：\n\n**什么是 AST（抽象语法树）？** 在 22-diff-parser 教程中已详细解释。简单回顾：AST 把代码解析成树形结构，能理解代码的语法含义。正则表达式只能做字符串替换，可能误改注释或字符串中的内容；AST 能精确定位到语法元素（如关键字参数 `shell=True`）。项目的 SafeFixer 先用正则快速匹配，再用 AST 精确修复。\n\n**什么是路径遍历攻击？** 路径遍历攻击（Path Traversal Attack）是通过 `../` 序列逃出限定目录的攻击。比如限定只能读 `/data/` 下的文件，攻击者传入 `../../etc/passwd` 就能读到系统密码文件。项目的 RepairVerifier 用 `os.path.realpath()` 检查修复后的文件路径是否在允许的目录内，防止恶意 Skill 通过路径遍历修改系统文件。"
             }
           ]
         },
@@ -245,6 +257,10 @@
             {
               "type": "text",
               "text": "自动修复模块的设计原则：(1) 保守修复——只处理 3 种确定性高的规则，其他规则不修复；(2) AST 优先——Python 文件使用 AST 修复，避免正则误伤；(3) 双重门禁——编译检查 + 测试检查，任一失败则拒绝修复；(4) 隔离执行——测试在临时目录中运行，不影响主仓库；(5) 安全检查——归档解压时防止路径遍历攻击；(6) 独立分支——修复写到 evoagent/fix-pr-* 分支，不直接改用户分支。这些原则确保自动修复不会引入新 bug。→ 延伸阅读：修复分支推送到 GitHub 的流程详见 14-GitHub 集成教程；修复前的编译/测试门禁与评测 Harness 的修复验证详见 17-评测教程。"
+            },
+            {
+              "type": "text",
+              "text": "---\n\n**自动修复保证了代码变更的安全性。** 但用户提交的自定义 Skill 代码本身安全吗？下一章的 Skill 沙箱解决这个问题。"
             }
           ]
         }

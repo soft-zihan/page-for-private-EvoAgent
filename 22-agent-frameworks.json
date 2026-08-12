@@ -1,6 +1,4 @@
 {
-  "title": "附录：从自建 Runtime 到主流 Agent 框架",
-  "description": "将 EvoAgent 的自建 AgentRuntime + AgentLoop + MultiAgentCoordinator 映射到 OpenAI Agents SDK、LangChain/LangGraph、CrewAI 三大主流框架，理解框架选型对文件结构和代码组织的影响。",
   "chapters": [
     {
       "title": "核心概念映射",
@@ -20,9 +18,14 @@
                 "content": "# EvoAgent 的调用链：Harness → Runtime → AgentLoop → ToolRegistry\n#\n# ReviewHarness.run()               ← 入口：任务生命周期管理\n#   └─ AgentRuntime.execute()       ← 节点编排：planning → executing → reviewing\n#        └─ MultiAgentCoordinator.review_with_context()  ← 多 Agent 协作\n#             └─ AgentLoop.run()     ← ReAct 循环：tool/final 二选一\n#                  └─ ToolRegistry.invoke()  ← 工具调用 + 参数校验\n#\n# 对比主流框架的等价调用链：\n# OpenAI Agents SDK: Runner.run(agent) → Agent.run() → handoff/tool\n# LangGraph:         graph.invoke() → StateGraph → nodes → edges → tools\n# CrewAI:            crew.kickoff() → Agent → Task → Tool"
               }
             }
-          ]
+          ],
+          "anchor": "af-overview-1",
+          "groupTitle": "框架概览",
+          "difficulty": "advanced",
+          "estimatedMinutes": 15
         }
-      ]
+      ],
+      "id": "af-overview"
     },
     {
       "title": "OpenAI Agents SDK 映射",
@@ -33,20 +36,60 @@
             {
               "type": "table",
               "table": {
-                "headers": ["EvoAgent 组件", "Agents SDK 等价物", "差异说明"],
+                "headers": [
+                  "EvoAgent 组件",
+                  "Agents SDK 等价物",
+                  "差异说明"
+                ],
                 "rows": [
-                  ["AgentRuntime.execute(nodes)", "Runner.run(agent)", "Agents SDK 用 Agent 的 handoff 链替代显式节点编排"],
-                  ["RuntimeNode(name, handler)", "Agent 的 instructions + tools", "每个 Agent 自带指令和工具集，不需要外部编排节点"],
-                  ["AgentLoop.run(stepper)", "Agent 内置 ReAct 循环", "Agents SDK 的 Agent 天然就是模型/工具循环，不需要手写"],
-                  ["ToolRegistry + AgentTool", "@function_tool 装饰器", "声明式注册，自动从函数签名生成 JSON Schema"],
-                  ["CollaborationBus", "Handoff 机制", "Agent 间通过 handoff_to 转交，不需要共享消息总线"],
-                  ["PlannerAgent.plan()", "Handoff 路由 / TriageAgent", "内置的 TriageAgent 做任务分发"],
-                  ["CriticAgent + VerifierAgent", "Guardrails", "输入/输出守卫替代后置验证"],
-                  ["CheckpointStore", "Runner 内置状态管理", "框架自动管理对话历史和检查点"]
+                  [
+                    "AgentRuntime.execute(nodes)",
+                    "Runner.run(agent)",
+                    "Agents SDK 用 Agent 的 handoff 链替代显式节点编排"
+                  ],
+                  [
+                    "RuntimeNode(name, handler)",
+                    "Agent 的 instructions + tools",
+                    "每个 Agent 自带指令和工具集，不需要外部编排节点"
+                  ],
+                  [
+                    "AgentLoop.run(stepper)",
+                    "Agent 内置 ReAct 循环",
+                    "Agents SDK 的 Agent 天然就是模型/工具循环，不需要手写"
+                  ],
+                  [
+                    "ToolRegistry + AgentTool",
+                    "@function_tool 装饰器",
+                    "声明式注册，自动从函数签名生成 JSON Schema"
+                  ],
+                  [
+                    "CollaborationBus",
+                    "Handoff 机制",
+                    "Agent 间通过 handoff_to 转交，不需要共享消息总线"
+                  ],
+                  [
+                    "PlannerAgent.plan()",
+                    "Handoff 路由 / TriageAgent",
+                    "内置的 TriageAgent 做任务分发"
+                  ],
+                  [
+                    "CriticAgent + VerifierAgent",
+                    "Guardrails",
+                    "输入/输出守卫替代后置验证"
+                  ],
+                  [
+                    "CheckpointStore",
+                    "Runner 内置状态管理",
+                    "框架自动管理对话历史和检查点"
+                  ]
                 ]
               }
             }
-          ]
+          ],
+          "anchor": "af-openai-agents-1",
+          "groupTitle": "OpenAI Agents SDK",
+          "difficulty": "advanced",
+          "estimatedMinutes": 15
         },
         {
           "title": "对照实现：多 Agent 审查",
@@ -63,7 +106,11 @@
               "type": "text",
               "content": "### OpenAI Agents SDK 对照\n\n```python\nfrom agents import Agent, Runner, function_tool, handoff\n\n# ── 工具声明：@function_tool 替代 ToolRegistry + AgentTool ──\n@function_tool\ndef search_diff(query: str, limit: int = 20) -> list:\n    \"\"\"Search the PR diff for a text fragment.\"\"\"\n    return [line for line in diff_lines if query.lower() in line.lower()][:limit]\n\n@function_tool\ndef changed_line(path: str, line: int) -> dict:\n    \"\"\"Read one added line by path and line number.\"\"\"\n    ...\n\n# ── Agent 定义：instructions 替代各 Agent 类的硬编码逻辑 ──\nsecurity_agent = Agent(\n    name=\"security-reviewer\",\n    instructions=\"Review code changes for security vulnerabilities...\",\n    tools=[search_diff, changed_line],\n)\n\nreliability_agent = Agent(\n    name=\"reliability-reviewer\",\n    instructions=\"Find reliability and observability regressions...\",\n    tools=[search_diff, changed_line],\n)\n\n# ── Critic Agent：替代 CriticAgent.challenge() ──\ncritic_agent = Agent(\n    name=\"critic\",\n    instructions=\"Challenge each finding: verify evidence matches changed lines...\",\n)\n\n# ── 入口 Agent：handoff 替代 PlannerAgent.plan() ──\ntriage_agent = Agent(\n    name=\"triage\",\n    instructions=\"Route PR review to appropriate specialist agents.\",\n    handoffs=[handoff(security_agent), handoff(reliability_agent)],\n)\n\n# ── 执行：Runner.run() 替代 AgentRuntime.execute() ──\nresult = await Runner.run(triage_agent, input=pr_context)\n# Agents SDK 自动管理：\n# - 模型/工具循环（替代 AgentLoop）\n# - Agent 间转交（替代 CollaborationBus）\n# - 对话历史（替代 CheckpointStore）\n```\n\n**关键差异**：\n- EvoAgent 的 6 节点编排被**压缩为 handoff 链**——triage 根据 diff 内容自动路由到对应 Agent\n- Critic + Verifier 的质疑/验证流程被**后置为 Guardrail**，在最终输出前统一校验\n- 不需要手写 `RuntimeNode`、`CollaborationBus`、`AgentMessage` 等编排基础设施"
             }
-          ]
+          ],
+          "anchor": "af-openai-agents-2",
+          "groupTitle": "OpenAI Agents SDK",
+          "difficulty": "advanced",
+          "estimatedMinutes": 15
         },
         {
           "title": "文件结构变化",
@@ -76,9 +123,14 @@
                 "content": "# EvoAgent 当前结构              Agents SDK 结构\n# ─────────────────────          ─────────────────────\n# evoagent/                      app/\n# ├── runtime.py    (309行)      ├── agents/\n# ├── agents.py    (1000行)      │   ├── triage.py        ← handoff 路由\n# ├── harness.py    (264行)      │   ├── security.py      ← @function_tool + Agent\n# ├── reviewer.py   (356行)      │   ├── reliability.py\n# ├── tool_registry(内嵌)        │   └── critic.py        ← Guardrail\n# ├── models.py                  ├── tools/\n# ├── store.py                   │   ├── diff_search.py   ← @function_tool\n# └── api.py        (548行)      │   └── file_reader.py\n#                                ├── guardrails/\n#                                │   └── finding_validator.py\n#                                ├── main.py              ← FastAPI + Runner.run()\n#                                └── config.py\n#\n# 变化要点：\n# 1. runtime.py (309行) → 删除，Agents SDK 内置\n# 2. agents.py (1000行) → 拆分为 agents/*.py，每个文件 <100 行\n# 3. harness.py (264行) → 简化为 main.py 中的 Runner.run() 调用\n# 4. ToolRegistry 内嵌 → tools/*.py，@function_tool 声明式注册\n# 5. api.py (548行) → FastAPI main.py，路由从手写变为装饰器\n# 6. 总代码量：~2500行 → ~800行（框架接管了编排/重试/检查点/消息传递）"
               }
             }
-          ]
+          ],
+          "anchor": "af-openai-agents-3",
+          "groupTitle": "OpenAI Agents SDK",
+          "difficulty": "advanced",
+          "estimatedMinutes": 15
         }
-      ]
+      ],
+      "id": "af-openai"
     },
     {
       "title": "LangGraph 映射",
@@ -89,20 +141,60 @@
             {
               "type": "table",
               "table": {
-                "headers": ["EvoAgent 组件", "LangGraph 等价物", "差异说明"],
+                "headers": [
+                  "EvoAgent 组件",
+                  "LangGraph 等价物",
+                  "差异说明"
+                ],
                 "rows": [
-                  ["AgentRuntime.execute(nodes)", "StateGraph + compile()", "LangGraph 用显式图定义节点和边，编译后执行"],
-                  ["RuntimeNode(name, handler)", "add_node(name, fn)", "几乎一一对应，但 LangGraph 节点接受 state 返回 state"],
-                  ["节点顺序执行", "add_edge(A, B)", "显式声明边，支持条件边 conditional_edge"],
-                  ["AgentLoop.run(stepper)", "create_react_agent()", "内置 ReAct Agent 工厂，不需要手写循环"],
-                  ["ToolRegistry", "ToolNode([tools])", "工具集包装为 ToolNode，挂在图的边上"],
-                  ["CollaborationBus", "State 中的 messages 列表", "共享状态替代消息总线，节点间通过 state 传递"],
-                  ["CheckpointStore", "MemorySaver / SqliteSaver", "框架内置检查点后端，支持时间旅行"],
-                  ["PlannerAgent → Specialist", "conditional_edge", "条件路由替代 Planner 的显式分配"]
+                  [
+                    "AgentRuntime.execute(nodes)",
+                    "StateGraph + compile()",
+                    "LangGraph 用显式图定义节点和边，编译后执行"
+                  ],
+                  [
+                    "RuntimeNode(name, handler)",
+                    "add_node(name, fn)",
+                    "几乎一一对应，但 LangGraph 节点接受 state 返回 state"
+                  ],
+                  [
+                    "节点顺序执行",
+                    "add_edge(A, B)",
+                    "显式声明边，支持条件边 conditional_edge"
+                  ],
+                  [
+                    "AgentLoop.run(stepper)",
+                    "create_react_agent()",
+                    "内置 ReAct Agent 工厂，不需要手写循环"
+                  ],
+                  [
+                    "ToolRegistry",
+                    "ToolNode([tools])",
+                    "工具集包装为 ToolNode，挂在图的边上"
+                  ],
+                  [
+                    "CollaborationBus",
+                    "State 中的 messages 列表",
+                    "共享状态替代消息总线，节点间通过 state 传递"
+                  ],
+                  [
+                    "CheckpointStore",
+                    "MemorySaver / SqliteSaver",
+                    "框架内置检查点后端，支持时间旅行"
+                  ],
+                  [
+                    "PlannerAgent → Specialist",
+                    "conditional_edge",
+                    "条件路由替代 Planner 的显式分配"
+                  ]
                 ]
               }
             }
-          ]
+          ],
+          "anchor": "af-langgraph-1",
+          "groupTitle": "LangGraph",
+          "difficulty": "advanced",
+          "estimatedMinutes": 15
         },
         {
           "title": "对照实现：多 Agent 审查",
@@ -111,7 +203,11 @@
               "type": "text",
               "content": "### LangGraph 对照\n\n```python\nfrom langgraph.graph import StateGraph, END\nfrom langgraph.prebuilt import create_react_agent, ToolNode\nfrom langchain_openai import ChatOpenAI\n\n# ── State 定义：替代 CollaborationState TypedDict ──\nfrom typing import TypedDict, Annotated\nimport operator\n\nclass ReviewState(TypedDict):\n    diff: str\n    findings: Annotated[list, operator.add]  # 自动累加，不需要手动 append\n    critiques: dict\n    verified: list\n\n# ── 工具：@tool 替代 AgentTool 手动定义 ──\n@tool\ndef search_diff(query: str) -> list:\n    \"\"\"Search diff for text fragment.\"\"\"\n    ...\n\n# ── 节点：每个函数对应一个 RuntimeNode ──\n# EvoAgent: RuntimeNode(\"planner\", self._plan_node)\n# LangGraph: 直接用函数，签名 (state) -> partial_state\ndef plan_node(state: ReviewState) -> dict:\n    # 分析 diff，决定分配给哪些 specialist\n    return {\"plan\": analyze_and_plan(state[\"diff\"])}\n\n# EvoAgent: _specialist_node 内部用 ThreadPoolExecutor 并发\n# LangGraph: 用 Send API 做 fan-out，或子图并发\nsecurity_agent = create_react_agent(\n    ChatOpenAI(model=\"gpt-4o\"),\n    tools=[search_diff, changed_line],\n    prompt=\"You are a security reviewer...\",\n)\n\ndef security_node(state: ReviewState) -> dict:\n    result = security_agent.invoke({\"messages\": [{\"role\": \"user\", \"content\": state[\"diff\"]}]})\n    return {\"findings\": extract_findings(result)}\n\n# ── 图编排：替代 RuntimeNode 列表 ──\ngraph = StateGraph(ReviewState)\ngraph.add_node(\"planner\", plan_node)\ngraph.add_node(\"security\", security_node)\ngraph.add_node(\"reliability\", reliability_node)\ngraph.add_node(\"critic\", critic_node)\ngraph.add_node(\"verifier\", verifier_node)\n\n# 边声明：替代 runtime.execute(state, [node1, node2, ...])\ngraph.add_edge(\"planner\", \"security\")\ngraph.add_edge(\"planner\", \"reliability\")  # fan-out\ngraph.add_edge(\"security\", \"critic\")\ngraph.add_edge(\"reliability\", \"critic\")   # fan-in\ngraph.add_edge(\"critic\", \"verifier\")\ngraph.add_edge(\"verifier\", END)\n\n# 编译 + 执行\napp = graph.compile(checkpointer=SqliteSaver(...))\nresult = app.invoke({\"diff\": pr_diff, \"findings\": [], \"critiques\": {}, \"verified\": []})\n```\n\n**关键差异**：\n- EvoAgent 的 6 节点线性链 → LangGraph 的**有向图**，支持 fan-out/fan-in 和条件路由\n- `CollaborationBus` 消息传递 → `Annotated[list, operator.add]` 状态累加\n- 手写检查点 → `SqliteSaver` 内置，支持**时间旅行调试**\n- `_specialist_node` 中的 `ThreadPoolExecutor` → LangGraph 的 `Send` API 原生并发"
             }
-          ]
+          ],
+          "anchor": "af-langgraph-2",
+          "groupTitle": "LangGraph",
+          "difficulty": "advanced",
+          "estimatedMinutes": 15
         },
         {
           "title": "文件结构变化",
@@ -124,9 +220,14 @@
                 "content": "# EvoAgent 当前结构              LangGraph 结构\n# ─────────────────────          ─────────────────────\n# evoagent/                      app/\n# ├── runtime.py    (309行)      ├── graph.py             ← StateGraph 定义 + 编译\n# ├── agents.py    (1000行)      ├── nodes/\n# ├── harness.py    (264行)      │   ├── planner.py       ← plan_node()\n# ├── reviewer.py   (356行)      │   ├── specialists.py   ← create_react_agent()\n# ├── store.py                   │   ├── critic.py        ← critic_node()\n# └── api.py        (548行)      │   └── verifier.py      ← verifier_node()\n#                                ├── tools/\n#                                │   ├── diff_search.py   ← @tool\n#                                │   └── file_reader.py\n#                                ├── state.py             ← ReviewState TypedDict\n#                                ├── server.py            ← FastAPI + LangServe\n#                                └── langgraph.json       ← 部署配置\n#\n# 变化要点：\n# 1. runtime.py → 删除，StateGraph + compile() 替代\n# 2. agents.py (1000行) → nodes/*.py，每个节点独立文件\n# 3. harness.py → graph.py 一个文件搞定编排 + 检查点\n# 4. api.py → server.py 用 LangServe 自动暴露 /invoke 端点\n# 5. 新增 langgraph.json：LangGraph Cloud 部署配置\n# 6. 可视化：graph.get_graph().draw_mermaid() 自动生成流程图"
               }
             }
-          ]
+          ],
+          "anchor": "af-langgraph-3",
+          "groupTitle": "LangGraph",
+          "difficulty": "advanced",
+          "estimatedMinutes": 15
         }
-      ]
+      ],
+      "id": "af-langgraph"
     },
     {
       "title": "LangChain 核心库映射",
@@ -138,7 +239,11 @@
               "type": "text",
               "content": "LangChain 生态分为两层：**LangChain 核心库**负责 LLM 调用、工具封装、记忆管理、可观测性等基础设施；**LangGraph** 在 LangChain 之上提供图编排能力。两者是互补关系，不是替代关系。\n\n| 层次 | 职责 | EvoAgent 对应组件 |\n|------|------|------------------|\n| **LangChain 核心** | LLM 调用、Tool 封装、Memory、Context 管理、Callbacks | `reviewer.py`、`memory.py`、`context_manager.py`、`observability.py` |\n| **LangGraph** | 图编排、状态管理、检查点、多 Agent 协作 | `runtime.py`、`agents.py`、`harness.py` |\n\n前一节的 LangGraph 映射覆盖了编排层。本节补充 LangChain 核心库对 EvoAgent 基础设施层的映射。"
             }
-          ]
+          ],
+          "anchor": "af-langchain-1",
+          "groupTitle": "LangChain 核心库",
+          "difficulty": "advanced",
+          "estimatedMinutes": 15
         },
         {
           "title": "概念对照：EvoAgent → LangChain 核心",
@@ -146,18 +251,50 @@
             {
               "type": "table",
               "table": {
-                "headers": ["EvoAgent 组件", "LangChain 等价物", "差异说明"],
+                "headers": [
+                  "EvoAgent 组件",
+                  "LangChain 等价物",
+                  "差异说明"
+                ],
                 "rows": [
-                  ["reviewer.py (urllib 调用 LLM)", "ChatOpenAI / BaseChatModel", "LangChain 封装了 LLM 调用协议，支持多模型切换"],
-                  ["ToolRegistry + AgentTool", "BaseTool / @tool 装饰器", "LangChain 的 @tool 自动从函数签名生成 Schema"],
-                  ["MemoryManager", "langchain.memory 家族", "LangChain 提供 Buffer/Summary/Entity 等多种记忆策略"],
-                  ["ContextManager (token 管理)", "PromptTemplate + text_splitter", "LangChain 用模板 + 分割器管理上下文窗口"],
-                  ["Observability (OpenTelemetry)", "LangSmith / LangFuse", "第三方平台替代自建 OTel，提供 UI 追踪"],
-                  ["event_sink (事件回调)", "Callbacks 系统", "LangChain 的 on_llm_start/on_tool_end 等回调钩子"]
+                  [
+                    "reviewer.py (urllib 调用 LLM)",
+                    "ChatOpenAI / BaseChatModel",
+                    "LangChain 封装了 LLM 调用协议，支持多模型切换"
+                  ],
+                  [
+                    "ToolRegistry + AgentTool",
+                    "BaseTool / @tool 装饰器",
+                    "LangChain 的 @tool 自动从函数签名生成 Schema"
+                  ],
+                  [
+                    "MemoryManager",
+                    "langchain.memory 家族",
+                    "LangChain 提供 Buffer/Summary/Entity 等多种记忆策略"
+                  ],
+                  [
+                    "ContextManager (token 管理)",
+                    "PromptTemplate + text_splitter",
+                    "LangChain 用模板 + 分割器管理上下文窗口"
+                  ],
+                  [
+                    "Observability (OpenTelemetry)",
+                    "LangSmith / LangFuse",
+                    "第三方平台替代自建 OTel，提供 UI 追踪"
+                  ],
+                  [
+                    "event_sink (事件回调)",
+                    "Callbacks 系统",
+                    "LangChain 的 on_llm_start/on_tool_end 等回调钩子"
+                  ]
                 ]
               }
             }
-          ]
+          ],
+          "anchor": "af-langchain-2",
+          "groupTitle": "LangChain 核心库",
+          "difficulty": "advanced",
+          "estimatedMinutes": 15
         },
         {
           "title": "对照实现：LLM 调用 + 工具 + 记忆",
@@ -166,9 +303,14 @@
               "type": "text",
               "content": "### LangChain 对照\n\n```python\n# ── 1. LLM 调用：ChatOpenAI 替代 urllib.request 手写协议 ──\n# EvoAgent (reviewer.py):\n#   import urllib.request\n#   req = urllib.request.Request(base_url + \"/chat/completions\", data=json.dumps({...}))\n#   resp = urllib.request.urlopen(req, timeout=timeout)\n#   result = json.loads(resp.read())\n#\n# LangChain:\nfrom langchain_openai import ChatOpenAI\nllm = ChatOpenAI(model=\"gpt-4o\", temperature=0)\nresponse = llm.invoke([\n    (\"system\", \"You are a code reviewer...\"),\n    (\"user\", diff_text),\n])\n# 优势：自动处理重试、超时、流式、多模型切换\n\n# ── 2. 工具封装：@tool 替代 AgentTool 手动定义 ──\n# EvoAgent (agents.py):\n#   AgentTool(\"search_diff\", \"Search the PR diff...\",\n#             {\"type\": \"object\", \"properties\": {...}}, handler)\n#\n# LangChain:\nfrom langchain.tools import tool\n\n@tool\ndef search_diff(query: str, limit: int = 20) -> list:\n    \"\"\"Search the PR diff for a text fragment.\"\"\"\n    return [line for line in diff_lines if query.lower() in line.lower()][:limit]\n# 优势：自动从函数签名 + docstring 生成 JSON Schema\n\n# ── 3. 记忆管理：Memory 替代 MemoryManager 手写实现 ──\n# EvoAgent (memory.py):\n#   class MemoryManager:\n#       def recall(tenant, repo, query) -> list\n#       def remember(tenant, repo, scope, kind, content)\n#\n# LangChain:\nfrom langchain.memory import ConversationSummaryMemory\nfrom langchain_community.chat_message_histories import PostgresChatMessageHistory\n\nmemory = ConversationSummaryMemory(\n    llm=llm,\n    chat_memory=PostgresChatMessageHistory(\n        session_id=task_id, connection_string=DB_URL\n    ),\n)\n# 优势：自动摘要压缩、多种存储后端、与 Chain 集成\n\n# ── 4. 上下文管理：PromptTemplate 替代 ContextManager ──\n# EvoAgent (context_manager.py):\n#   bundle = context_manager.build(diff, assignment, memories)\n#   managed = context_manager.compose(bundle, inbox, tools)\n#\n# LangChain:\nfrom langchain.prompts import ChatPromptTemplate\n\nprompt = ChatPromptTemplate.from_messages([\n    (\"system\", \"Review code changes. Available tools: {tools}\"),\n    (\"user\", \"PR diff:\\n{diff}\\n\\nAssignment: {assignment}\\n\\nMemories: {memories}\"),\n])\n# 优势：模板变量自动填充、token 计数、自动截断\n\n# ── 5. 可观测性：LangSmith 替代自建 OTel ──\n# EvoAgent (observability.py):\n#   with observability.span(\"runtime.planner\", task_id, node=\"planner\"):\n#       result = plan_node(state)\n#\n# LangChain + LangSmith:\nimport os\nos.environ[\"LANGCHAIN_TRACING_V2\"] = \"true\"\nos.environ[\"LANGCHAIN_API_KEY\"] = \"...\"\n# 零代码集成：LangChain 自动追踪每个 LLM 调用、工具调用、Chain 执行\n# LangSmith UI 提供时间线、token 用量、成本分析\n```\n\n**关键差异**：\n- EvoAgent 的 `urllib.request` 手写 LLM 调用 → LangChain 一行 `llm.invoke()`\n- EvoAgent 的 `MemoryManager` 手写召回/存储 → LangChain 内置 Memory 类 + 多种存储后端\n- EvoAgent 的 `ContextManager` 手写 token 管理 → LangChain PromptTemplate 自动截断\n- EvoAgent 的 `Observability` 自建 OTel → LangSmith 零代码追踪\n\n**注意**：LangChain 核心库**不解决编排问题**。多 Agent 协作、节点编排、检查点恢复仍需 LangGraph。"
             }
-          ]
+          ],
+          "anchor": "af-langchain-3",
+          "groupTitle": "LangChain 核心库",
+          "difficulty": "advanced",
+          "estimatedMinutes": 15
         }
-      ]
+      ],
+      "id": "af-langchain"
     },
     {
       "title": "CrewAI 映射",
@@ -179,20 +321,60 @@
             {
               "type": "table",
               "table": {
-                "headers": ["EvoAgent 组件", "CrewAI 等价物", "差异说明"],
+                "headers": [
+                  "EvoAgent 组件",
+                  "CrewAI 等价物",
+                  "差异说明"
+                ],
                 "rows": [
-                  ["AgentRuntime.execute(nodes)", "Crew(kickoff)", "CrewAI 用 Crew 编排 Agent + Task，自动执行"],
-                  ["RuntimeNode", "Task", "Task 绑定 Agent，Agent 执行 Task 产出结果"],
-                  ["AgentLoop.run(stepper)", "Agent 内置 ReAct", "CrewAI Agent 自带工具调用循环"],
-                  ["ToolRegistry", "Tool 基类继承", "class SearchDiffTool(BaseTool)"],
-                  ["PlannerAgent", "ManagerAgent / hierarchical", "层级模式下 Manager 自动分派任务"],
-                  ["CriticAgent + VerifierAgent", "Task 链 + 前序 Task 输出", "后续 Task 可引用前序 Task 的输出做校验"],
-                  ["CollaborationBus", "共享 ShortTermMemory", "Agent 间通过记忆系统共享上下文"],
-                  ["CheckpointStore", "CrewAI 内置持久化", "企业版支持任务断点续传"]
+                  [
+                    "AgentRuntime.execute(nodes)",
+                    "Crew(kickoff)",
+                    "CrewAI 用 Crew 编排 Agent + Task，自动执行"
+                  ],
+                  [
+                    "RuntimeNode",
+                    "Task",
+                    "Task 绑定 Agent，Agent 执行 Task 产出结果"
+                  ],
+                  [
+                    "AgentLoop.run(stepper)",
+                    "Agent 内置 ReAct",
+                    "CrewAI Agent 自带工具调用循环"
+                  ],
+                  [
+                    "ToolRegistry",
+                    "Tool 基类继承",
+                    "class SearchDiffTool(BaseTool)"
+                  ],
+                  [
+                    "PlannerAgent",
+                    "ManagerAgent / hierarchical",
+                    "层级模式下 Manager 自动分派任务"
+                  ],
+                  [
+                    "CriticAgent + VerifierAgent",
+                    "Task 链 + 前序 Task 输出",
+                    "后续 Task 可引用前序 Task 的输出做校验"
+                  ],
+                  [
+                    "CollaborationBus",
+                    "共享 ShortTermMemory",
+                    "Agent 间通过记忆系统共享上下文"
+                  ],
+                  [
+                    "CheckpointStore",
+                    "CrewAI 内置持久化",
+                    "企业版支持任务断点续传"
+                  ]
                 ]
               }
             }
-          ]
+          ],
+          "anchor": "af-crewai-1",
+          "groupTitle": "CrewAI",
+          "difficulty": "advanced",
+          "estimatedMinutes": 15
         },
         {
           "title": "对照实现：多 Agent 审查",
@@ -201,7 +383,11 @@
               "type": "text",
               "content": "### CrewAI 对照\n\n```python\nfrom crewai import Agent, Task, Crew, Process\nfrom crewai.tools import tool\n\n# ── 工具：@tool 替代 AgentTool ──\n@tool(\"Search Diff\")\ndef search_diff(query: str) -> list:\n    \"\"\"Search the PR diff for a text fragment.\"\"\"\n    ...\n\n# ── Agent 定义：替代各 Agent 类 ──\nsecurity_agent = Agent(\n    role=\"Security Reviewer\",\n    goal=\"Find security vulnerabilities in code changes\",\n    backstory=\"Expert in OWASP Top 10 and CWE classification\",\n    tools=[search_diff, changed_line],\n    llm=\"gpt-4o\",\n)\n\ncritic_agent = Agent(\n    role=\"Finding Critic\",\n    goal=\"Challenge and verify findings from specialists\",\n    backstory=\"Skeptical reviewer who demands evidence\",\n)\n\n# ── Task 定义：替代 RuntimeNode ──\n# EvoAgent: RuntimeNode(\"specialists\", self._specialist_node)\n# CrewAI: Task(description, agent, expected_output)\nsecurity_task = Task(\n    description=\"Review this PR diff for security issues: {diff}\",\n    agent=security_agent,\n    expected_output=\"List of Finding objects with evidence\",\n)\n\n# Critic Task 引用前序 Task 的输出（替代 CriticAgent.challenge()）\ncritic_task = Task(\n    description=\"Challenge each finding. Verify evidence matches changed lines.\",\n    agent=critic_agent,\n    expected_output=\"Verified findings with adjusted confidence\",\n    context=[security_task],  # 自动注入 security_task 的输出\n)\n\n# ── Crew 编排：替代 AgentRuntime + MultiAgentCoordinator ──\ncrew = Crew(\n    agents=[security_agent, critic_agent],\n    tasks=[security_task, critic_task],\n    process=Process.sequential,  # 或 Process.hierarchical（自动 Manager 分派）\n    verbose=True,\n)\n\n# 执行：替代 runtime.execute(state, nodes)\nresult = crew.kickoff(inputs={\"diff\": pr_diff})\n```\n\n**关键差异**：\n- EvoAgent 的 6 节点 + 手写协作 → CrewAI 的 `Task.context` 链式依赖\n- `CollaborationBus` 消息传递 → `context=[security_task]` 自动注入前序输出\n- 手写 PlannerAgent → `Process.hierarchical` 模式，ManagerAgent 自动分派\n- `AgentLoop` + `ToolRegistry` → Agent 自带工具调用循环"
             }
-          ]
+          ],
+          "anchor": "af-crewai-2",
+          "groupTitle": "CrewAI",
+          "difficulty": "advanced",
+          "estimatedMinutes": 15
         },
         {
           "title": "文件结构变化",
@@ -214,9 +400,14 @@
                 "content": "# EvoAgent 当前结构              CrewAI 结构\n# ─────────────────────          ─────────────────────\n# evoagent/                      src/\n# ├── runtime.py    (309行)      ├── config/\n# ├── agents.py    (1000行)      │   ├── agents.yaml      ← Agent 声明式配置\n# ├── harness.py    (264行)      │   └── tasks.yaml       ← Task 声明式配置\n# ├── reviewer.py   (356行)      ├── crew.py              ← Crew 组装\n# ├── store.py                   ├── tools/\n# └── api.py        (548行)      │   ├── diff_search.py   ← @tool\n#                                │   └── file_reader.py\n#                                ├── main.py              ← FastAPI 入口\n#                                └── pyproject.toml       ← crewai create 生成\n#\n# 变化要点：\n# 1. runtime.py + harness.py → 删除，Crew 类替代\n# 2. agents.py (1000行) → agents.yaml 声明式配置（~30行 YAML）\n# 3. 各节点逻辑 → tasks.yaml 声明式配置（~20行 YAML）\n# 4. crew.py 只负责组装 Agent + Task + Process\n# 5. 代码量大幅减少：~2500行 Python → ~400行 Python + ~50行 YAML"
               }
             }
-          ]
+          ],
+          "anchor": "af-crewai-3",
+          "groupTitle": "CrewAI",
+          "difficulty": "advanced",
+          "estimatedMinutes": 15
         }
-      ]
+      ],
+      "id": "af-crewai"
     },
     {
       "title": "混合使用策略：哪些该用框架、哪些不该用",
@@ -228,7 +419,11 @@
               "type": "text",
               "content": "实际项目中，框架和自建代码不是二选一的关系，而是**三层嵌套**：\n\n```\n┌─────────────────────────────────────────┐\n│  第三层：编排层 (LangGraph)                │  ← 可以替换\n│  AgentRuntime / AgentLoop / 节点编排      │\n├─────────────────────────────────────────┤\n│  第二层：基础设施层 (LangChain)             │  ← 可以替换\n│  LLM 调用 / Tool 注册 / Memory 存储       │\n├─────────────────────────────────────────┤\n│  第一层：领域逻辑层 (必须自建)               │  ← 不能替换\n│  审查规则 / 证据校验 / 上下文压缩 / 记忆评分   │\n└─────────────────────────────────────────┘\n```\n\n**核心原则**：框架处理「通用模式」，自建代码处理「业务规则」。\n\n| 层次 | 特征 | 能用框架吗？ | EvoAgent 代码量 |\n|------|------|-----------|---------------|\n| 编排层 | 节点执行、重试、检查点 | ✅ LangGraph | ~600行 (runtime.py + harness.py) |\n| 基础设施层 | LLM 调用、工具注册、存储 | ✅ LangChain | ~400行 (reviewer.py LLM部分 + observability.py) |\n| 领域逻辑层 | 业务规则、算法、校验 | ❌ 必须自建 | ~1200行 (审查规则 + 证据校验 + 上下文压缩 + 记忆评分) |"
             }
-          ]
+          ],
+          "anchor": "af-mixed-strategy-1",
+          "groupTitle": "混合使用策略",
+          "difficulty": "advanced",
+          "estimatedMinutes": 15
         },
         {
           "title": "第一层：必须自建（领域逻辑）",
@@ -240,20 +435,60 @@
             {
               "type": "table",
               "table": {
-                "headers": ["模块", "代码位置", "为什么不能用框架"],
+                "headers": [
+                  "模块",
+                  "代码位置",
+                  "为什么不能用框架"
+                ],
                 "rows": [
-                  ["正则审查规则", "reviewer.py:25-79", "6 条确定性规则（SEC-EVAL/SEC-SUBPROCESS-SHELL 等）是纯正则匹配，100% 可靠、零延迟。框架无法提升确定性逻辑"],
-                  ["Diff 解析", "diff_parser.py", "52 行纯解析逻辑，无外部依赖，无框架可替代"],
-                  ["上下文压缩算法", "context_manager.py:79-145", "风险评分 hunk 压缩：按 `risk_domains` + `RISK_TERMS` 打分排序，保留高风险变更行、丢弃低风险上下文。LangChain 的 `text_splitter` 只做 token 截断，不懂代码审查语义"],
-                  ["记忆召回评分", "memory.py:65-102", "自定义 TF-IDF 变体：`coverage * 0.55 + specificity * 0.15 + importance * 0.25`，混合覆盖率、特异性、重要性三个维度。LangChain Memory 只存储，不评分"],
-                  ["Critic 5 项证据检查", "agents.py:250-277", "检查：(1) 位置是否为新增行 (2) 引用证据是否匹配源行 (3) 解释是否够具体 (4) 修复建议是否可执行 (5) 测试策略是否可执行。这是审查质量门禁，不能用 LLM 替代"],
-                  ["证据签名匹配", "agents.py:283-305", "确定性验证：`SEC-EVAL` → `eval(` 或 `exec(` 在行中。纯字符串匹配，不需要 LLM"],
-                  ["Verifier 置信度阈值", "agents.py:341-356", "`confidence < 0.55` 则拒绝。业务决策阈值，硬编码才能保证一致性"],
-                  ["Arbiter 去重排序", "agents.py:362-376", "按 `(path, line, rule_id)` 去重，取高置信度版本，按严重度排序。纯业务逻辑"]
+                  [
+                    "正则审查规则",
+                    "reviewer.py:25-79",
+                    "6 条确定性规则（SEC-EVAL/SEC-SUBPROCESS-SHELL 等）是纯正则匹配，100% 可靠、零延迟。框架无法提升确定性逻辑"
+                  ],
+                  [
+                    "Diff 解析",
+                    "diff_parser.py",
+                    "52 行纯解析逻辑，无外部依赖，无框架可替代"
+                  ],
+                  [
+                    "上下文压缩算法",
+                    "context_manager.py:79-145",
+                    "风险评分 hunk 压缩：按 `risk_domains` + `RISK_TERMS` 打分排序，保留高风险变更行、丢弃低风险上下文。LangChain 的 `text_splitter` 只做 token 截断，不懂代码审查语义"
+                  ],
+                  [
+                    "记忆召回评分",
+                    "memory.py:65-102",
+                    "自定义 TF-IDF 变体：`coverage * 0.55 + specificity * 0.15 + importance * 0.25`，混合覆盖率、特异性、重要性三个维度。LangChain Memory 只存储，不评分"
+                  ],
+                  [
+                    "Critic 5 项证据检查",
+                    "agents.py:250-277",
+                    "检查：(1) 位置是否为新增行 (2) 引用证据是否匹配源行 (3) 解释是否够具体 (4) 修复建议是否可执行 (5) 测试策略是否可执行。这是审查质量门禁，不能用 LLM 替代"
+                  ],
+                  [
+                    "证据签名匹配",
+                    "agents.py:283-305",
+                    "确定性验证：`SEC-EVAL` → `eval(` 或 `exec(` 在行中。纯字符串匹配，不需要 LLM"
+                  ],
+                  [
+                    "Verifier 置信度阈值",
+                    "agents.py:341-356",
+                    "`confidence < 0.55` 则拒绝。业务决策阈值，硬编码才能保证一致性"
+                  ],
+                  [
+                    "Arbiter 去重排序",
+                    "agents.py:362-376",
+                    "按 `(path, line, rule_id)` 去重，取高置信度版本，按严重度排序。纯业务逻辑"
+                  ]
                 ]
               }
             }
-          ]
+          ],
+          "anchor": "af-mixed-strategy-2",
+          "groupTitle": "混合使用策略",
+          "difficulty": "advanced",
+          "estimatedMinutes": 15
         },
         {
           "title": "第二层：可以用 LangChain（基础设施）",
@@ -286,7 +521,11 @@
                 "content": "# ── 可以替换的部分：存储后端用 LangChain Memory ──\n# EvoAgent 当前 (memory.py:63)：\n#   self.store.save_agent_memory(record)  # 自建 PostgreSQL 表\n#\n# LangChain 替代：\nfrom langchain_community.chat_message_histories import PostgresChatMessageHistory\nchat_memory = PostgresChatMessageHistory(\n    session_id=f\"{tenant_id}:{repository}\",\n    connection_string=DB_URL,\n)\nchat_memory.add_message(content)\n\n# ── 不能替换的部分：recall 评分算法保持自建 ──\n# memory.py:83-102 的自定义评分：\n#   score = coverage * 0.55       # query 与 memory 的 token 重叠率\n#         + specificity * 0.15    # memory 被 query 命中的比例\n#         + importance * 0.25     # 业务重要性（0-1）\n#         + 0.05 / (index + 1)    # 时间衰减\n# LangChain Memory 只存储和检索，不做多维度排序\n# 如果用 LangChain，需要自定义 Retriever 来保留评分逻辑"
               }
             }
-          ]
+          ],
+          "anchor": "af-mixed-strategy-3",
+          "groupTitle": "混合使用策略",
+          "difficulty": "advanced",
+          "estimatedMinutes": 15
         },
         {
           "title": "第三层：可以用 LangGraph（编排层）",
@@ -295,7 +534,11 @@
               "type": "text",
               "content": "编排层是最适合用框架替代的——它处理「通用模式」而非业务逻辑：\n\n| EvoAgent 自建代码 | LangGraph 替代 | 替代后的收益 |\n|-----------------|---------------|------------|\n| `AgentRuntime.execute()` (309行) | `StateGraph.compile() + invoke()` | 获得可视化、时间旅行调试、分布式执行 |\n| `AgentLoop.run()` (75行) | `create_react_agent()` | 获得工具调用追踪、自动重试、流式输出 |\n| `CollaborationBus` (30行) | `Annotated[list, operator.add]` | 节点间自动消息合并，无需手写锁 |\n| `CheckpointStore` (自建 SQL) | `SqliteSaver` / `PostgresSaver` | 框架内置，支持时间旅行恢复 |\n| `runtime.py` 全部 (309行) | 删除 | 框架完全接管 |\n\n**关键**：LangGraph 的节点函数签名 `(state) -> dict` 与 EvoAgent 的 `RuntimeNode.handler` 完全一致，迁移几乎不需要改函数内部逻辑。"
             }
-          ]
+          ],
+          "anchor": "af-mixed-strategy-4",
+          "groupTitle": "混合使用策略",
+          "difficulty": "advanced",
+          "estimatedMinutes": 15
         },
         {
           "title": "实战：混合架构示例",
@@ -312,9 +555,14 @@
               "type": "text",
               "content": "**一句话总结**：用 LangGraph 编排节点执行顺序，用 LangChain 处理 LLM 调用和工具注册，但审查规则、证据校验、上下文压缩、记忆评分这些**领域逻辑**永远保持自建。\n\nEvoAgent 的架构已经隐含了这种分层——`runtime.py` 是编排层、`reviewer.py` 的 LLM 部分是基础设施层、`agents.py` 的 CriticAgent/EvidenceAgent/VerifierAgent 是领域逻辑层。迁移到框架时，只需要按这个分层逐层替换，不需要推倒重来。"
             }
-          ]
+          ],
+          "anchor": "af-mixed-strategy-5",
+          "groupTitle": "混合使用策略",
+          "difficulty": "advanced",
+          "estimatedMinutes": 15
         }
-      ]
+      ],
+      "id": "af-mixed"
     },
     {
       "title": "三大框架选型对比",
@@ -325,21 +573,85 @@
             {
               "type": "table",
               "table": {
-                "headers": ["维度", "OpenAI Agents SDK", "LangChain 核心", "LangGraph", "CrewAI"],
+                "headers": [
+                  "维度",
+                  "OpenAI Agents SDK",
+                  "LangChain 核心",
+                  "LangGraph",
+                  "CrewAI"
+                ],
                 "rows": [
-                  ["主要职责", "Agent 编排", "LLM/工具/记忆封装", "图编排 + 状态管理", "角色任务编排"],
-                  ["编排模型", "Handoff 链", "无（链式调用）", "有向图 (StateGraph)", "Task 链 / 层级"],
-                  ["与 EvoAgent 相似度", "中", "高（Memory/Context 一一对应）", "高（节点 + 边）", "低"],
-                  ["迁移工作量", "中", "小（替换基础设施层）", "小（替换编排层）", "大"],
-                  ["LLM 厂商锁定", "OpenAI only", "无锁定", "无锁定", "无锁定"],
-                  ["状态持久化", "Runner 内置", "多种 Memory 后端", "SqliteSaver / PostgresSaver", "企业版"],
-                  ["可观测性", "无", "LangSmith / LangFuse", "LangGraph Studio", "Web Dashboard"],
-                  ["适用场景", "OpenAI 生态", "基础设施替换", "复杂工作流", "快速原型"],
-                  ["EvoAgent 最适合?", "LLM Agent 迁移", "渐进式迁移第一步", "全量迁移", "多 Agent 验证"]
+                  [
+                    "主要职责",
+                    "Agent 编排",
+                    "LLM/工具/记忆封装",
+                    "图编排 + 状态管理",
+                    "角色任务编排"
+                  ],
+                  [
+                    "编排模型",
+                    "Handoff 链",
+                    "无（链式调用）",
+                    "有向图 (StateGraph)",
+                    "Task 链 / 层级"
+                  ],
+                  [
+                    "与 EvoAgent 相似度",
+                    "中",
+                    "高（Memory/Context 一一对应）",
+                    "高（节点 + 边）",
+                    "低"
+                  ],
+                  [
+                    "迁移工作量",
+                    "中",
+                    "小（替换基础设施层）",
+                    "小（替换编排层）",
+                    "大"
+                  ],
+                  [
+                    "LLM 厂商锁定",
+                    "OpenAI only",
+                    "无锁定",
+                    "无锁定",
+                    "无锁定"
+                  ],
+                  [
+                    "状态持久化",
+                    "Runner 内置",
+                    "多种 Memory 后端",
+                    "SqliteSaver / PostgresSaver",
+                    "企业版"
+                  ],
+                  [
+                    "可观测性",
+                    "无",
+                    "LangSmith / LangFuse",
+                    "LangGraph Studio",
+                    "Web Dashboard"
+                  ],
+                  [
+                    "适用场景",
+                    "OpenAI 生态",
+                    "基础设施替换",
+                    "复杂工作流",
+                    "快速原型"
+                  ],
+                  [
+                    "EvoAgent 最适合?",
+                    "LLM Agent 迁移",
+                    "渐进式迁移第一步",
+                    "全量迁移",
+                    "多 Agent 验证"
+                  ]
                 ]
               }
             }
-          ]
+          ],
+          "anchor": "af-comparison-1",
+          "groupTitle": "选型对比",
+          "difficulty": "advanced",
+          "estimatedMinutes": 15
         },
         {
           "title": "迁移策略建议",
@@ -348,9 +660,14 @@
               "type": "text",
               "content": "### 渐进式迁移路径\n\n**阶段 0：LangChain 核心库替换基础设施（零风险）**\n\n保留整个编排层不变，只替换基础设施：`urllib.request` → `ChatOpenAI`、`MemoryManager` → `ConversationSummaryMemory`、`ContextManager` → `ChatPromptTemplate`、`Observability` → LangSmith。这是风险最低的起步——审查逻辑完全不受影响，但获得了多模型支持、记忆压缩和可观测性。\n\n**阶段 1：AgentLoop → create_react_agent（最小改动）**\n\n保留 `AgentRuntime` 节点编排不变，只把 `AgentLoop.run()` 替换为 LangGraph 内置的 ReAct Agent。`ToolRegistry` 中的 `search_diff`、`changed_line` 等工具直接包装为 `@tool`，审查逻辑不受影响。\n\n**阶段 2：AgentRuntime → StateGraph（结构对齐）**\n\n将 `RuntimeNode` 链替换为 LangGraph 的 `StateGraph`。`_plan_node`、`_specialist_node` 等函数签名 `(state) -> dict` 不变，只需要加 `add_node()` + `add_edge()`。检查点从自建 `CheckpointStore` 迁移到 `SqliteSaver`。\n\n**阶段 3：MultiAgentCoordinator → 框架 Agent（全面替换）**\n\n将 `agents.py` 中的 1000 行 Python 类拆分为独立的 Agent 定义 + Task 配置。`PlannerAgent` → 条件路由或 ManagerAgent，`CriticAgent` → 独立 Agent 或 Guardrail。\n\n### 不变的核心资产\n\n无论迁移到哪个框架，以下组件**不需要改动**：\n\n- **diff_parser.py** — 纯解析逻辑，与框架无关\n- **reviewer.py** 中的正则规则 — 确定性审查不依赖 LLM\n- **store.py / postgres_store.py** — 持久化层独立于 Agent 框架\n- **Finding / ReviewReport 数据模型** — 业务模型与编排解耦\n- **auth.py / github.py** — 认证和外部集成是独立关注点\n\n这正是 EvoAgent 架构设计的优势：**审查逻辑和 Agent 编排正交**，迁移框架只需要替换编排层，审查核心完全保留。"
             }
-          ]
+          ],
+          "anchor": "af-comparison-2",
+          "groupTitle": "选型对比",
+          "difficulty": "advanced",
+          "estimatedMinutes": 15
         }
-      ]
+      ],
+      "id": "af-comparison"
     }
   ]
 }

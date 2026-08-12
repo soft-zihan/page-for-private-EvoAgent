@@ -12,6 +12,18 @@
           "estimatedMinutes": 10,
           "blocks": [
             {
+              "type": "diagram",
+              "diagram": {
+                "language": "mermaid",
+                "content": "graph TB\n    subgraph 接入层[\"🌐 接入层\"]\n        A[HTTP API<br/>api.py] --> B[GitHub Webhook<br/>github.py]\n    end\n    subgraph 服务编排层[\"⚙️ 服务编排层\"]\n        C[ReviewService<br/>service.py]\n    end\n    subgraph 运行时层[\"🔄 运行时层\"]\n        D[ReviewHarness<br/>harness.py]\n        E[AgentRuntime<br/>runtime.py]\n        F[AgentLoop<br/>runtime.py]\n    end\n    subgraph 审查层[\"⭐ 🔍 审查层\"]\n        G[MultiAgentCoordinator<br/>agents.py]\n        H[Reviewer 实现<br/>reviewer.py]\n        I[Skill Registry<br/>skills.py]\n    end\n    subgraph 持久化层[\"💾 持久化层\"]\n        J[TaskStore<br/>store.py / postgres_store.py]\n        K[TaskQueue<br/>task_queue.py]\n    end\n    subgraph 基础设施[\"🧠 基础设施\"]\n        L[ContextManager<br/>context_manager.py]\n        M[MemoryManager<br/>memory.py]\n        N[Observability<br/>observability.py]\n    end\n    A --> C\n    B --> C\n    C --> D\n    D --> E\n    E --> F\n    D --> G\n    G --> H\n    G --> I\n    C --> J\n    C --> K\n    G --> L\n    G --> M\n    D --> N",
+                "caption": "EvoAgent 系统架构 — 当前章节：审查层"
+              }
+            },
+            {
+              "type": "text",
+              "text": "> 📍 **当前位置**：本章讲解 审查层 的实现细节。参考架构图了解它在系统中的位置。"
+            },
+            {
               "type": "text",
               "text": "Reviewer 是 EvoAgent 的核心抽象——一个只接收 diff 和解析结果、返回 Finding 列表的接口。所有审查器（规则、LLM、Skill）都实现这个接口。这种策略模式使得系统可以在不修改调用方的情况下替换或组合不同的审查策略。"
             },
@@ -171,13 +183,13 @@
           "blocks": [
             {
               "type": "text",
-              "text": "让我们用 PR #42 的 deploy.py diff 来演示 LocalRuleReviewer 的审查过程。05-diff-parser 教程已经展示了 parse_unified_diff() 的输出——14 个 ChangedLine。现在 LocalRuleReviewer 在这 14 行上运行 6 条规则的正则匹配。"
+              "text": "让我们用 PR #42 的 deploy.py diff 来演示 LocalRuleReviewer 的审查过程。22-diff-parser 教程已经展示了 parse_unified_diff() 的输出——14 个 ChangedLine。现在 LocalRuleReviewer 在这 14 行上运行 6 条规则的正则匹配。"
             },
             {
               "type": "code",
               "code": {
                 "language": "text",
-                "content": "# ===== LocalRuleReviewer 逐行 × 逐规则匹配 PR #42 的完整过程 =====\n# 输入：05-diff-parser 教程中 parse_unified_diff() 输出的 14 个 ChangedLine\n# 处理：每个 ChangedLine 依次经过 6 条正则规则匹配\n# 输出：匹配成功的行生成 Finding 对象，最终共 5 个 Finding\n\n# --- 第 1 行：普通 import 语句，不含任何危险模式 ---\nChangedLine(\"deploy.py\", 2, \"import subprocess\")\n  → 6 条规则均不匹配 ✗  # import 本身是安全的，subprocess 模块名不等于调用\n\n# --- 第 2 行：硬编码 API 密钥，触发安全规则 ---\nChangedLine(\"deploy.py\", 4, 'API_KEY = \"sk-prod-a1b2c3d4e5\"')\n  → SEC-HARDCODED-SECRET 匹配！  # 正则 (?i)\\b(password|api_key)=['\"] 命中\n  # 赋值右侧是字符串字面量 \"sk-prod-...\"，符合硬编码密钥的判定条件\n  → Finding: rule_id=SEC-HARDCODED-SECRET, severity=HIGH, confidence=0.9\n\n# --- 第 3 行：从环境变量读取密码，不是硬编码 ---\nChangedLine(\"deploy.py\", 5, 'DB_PASSWORD = os.environ.get(\"DB_PASSWORD\", \"\")')\n  → SEC-HARDCODED-SECRET 不匹配  # 赋值右侧是函数调用 os.environ.get()，不是字符串字面量\n  → 6 条规则均不匹配 ✗  # 这就是为什么它不是 Finding——正则审查的优势：确定性、无幻觉\n\n# --- 第 4 行：调试输出 print()，触发可靠性规则 ---\nChangedLine(\"deploy.py\", 9, 'print(f\"Deploying to {env} with key {API_KEY}\")')\n  → REL-DEBUG-PRINT 匹配！  # 正则 \\b(print\\s*\\() 命中\n  # 生产代码不应包含 print() 调试输出，会污染日志或泄露敏感数据\n  → Finding: rule_id=REL-DEBUG-PRINT, severity=LOW, confidence=0.9\n\n# --- 第 5 行：shell=True 允许命令注入，触发安全规则 ---\nChangedLine(\"deploy.py\", 10, 'subprocess.run(f\"kubectl apply -f {config}\", shell=True)')\n  → SEC-SUBPROCESS-SHELL 匹配！  # 正则 \\bshell\\s*=\\s*True\\b 命中\n  # shell=True 让 subprocess 通过系统 shell 执行命令，f-string 拼接用户输入可导致命令注入\n  → Finding: rule_id=SEC-SUBPROCESS-SHELL, severity=HIGH, confidence=0.9\n\n# --- 第 6 行：SQL 字符串拼接，存在注入风险 ---\nChangedLine(\"deploy.py\", 11, \"cursor.execute(\\\"SELECT ...\\\" + env + \\\"'\\\")\")\n  → SEC-SQL-CONCAT 匹配！  # 正则 (?i)execute\\(.*\\+ 命中\n  # execute() 中使用字符串拼接（+）构建 SQL，攻击者可通过 env 变量注入恶意 SQL\n  → Finding: rule_id=SEC-SQL-CONCAT, severity=HIGH, confidence=0.9\n\n# --- 第 7 行：宽泛异常捕获，隐藏真实错误 ---\nChangedLine(\"deploy.py\", 13, \"except Exception:\")\n  → REL-EMPTY-EXCEPT 匹配！  # 正则 ^\\s*except\\s*(Exception)?: 命中\n  # 捕获 Exception 但不处理（无 as e），会吞掉所有异常包括编程错误\n  → Finding: rule_id=REL-EMPTY-EXCEPT, severity=MEDIUM, confidence=0.9\n\n# ===== 最终输出：5 个 Finding（与 02-架构教程中的表格一致） =====\n# 14 行新增代码 × 6 条规则 = 84 次正则匹配尝试，其中 5 次命中\n# 命中率低的行（如 import、os.environ.get）被安全跳过——这就是确定性规则审查的特点",
+                "content": "# ===== LocalRuleReviewer 逐行 × 逐规则匹配 PR #42 的完整过程 =====\n# 输入：22-diff-parser 教程中 parse_unified_diff() 输出的 14 个 ChangedLine\n# 处理：每个 ChangedLine 依次经过 6 条正则规则匹配\n# 输出：匹配成功的行生成 Finding 对象，最终共 5 个 Finding\n\n# --- 第 1 行：普通 import 语句，不含任何危险模式 ---\nChangedLine(\"deploy.py\", 2, \"import subprocess\")\n  → 6 条规则均不匹配 ✗  # import 本身是安全的，subprocess 模块名不等于调用\n\n# --- 第 2 行：硬编码 API 密钥，触发安全规则 ---\nChangedLine(\"deploy.py\", 4, 'API_KEY = \"sk-prod-a1b2c3d4e5\"')\n  → SEC-HARDCODED-SECRET 匹配！  # 正则 (?i)\\b(password|api_key)=['\"] 命中\n  # 赋值右侧是字符串字面量 \"sk-prod-...\"，符合硬编码密钥的判定条件\n  → Finding: rule_id=SEC-HARDCODED-SECRET, severity=HIGH, confidence=0.9\n\n# --- 第 3 行：从环境变量读取密码，不是硬编码 ---\nChangedLine(\"deploy.py\", 5, 'DB_PASSWORD = os.environ.get(\"DB_PASSWORD\", \"\")')\n  → SEC-HARDCODED-SECRET 不匹配  # 赋值右侧是函数调用 os.environ.get()，不是字符串字面量\n  → 6 条规则均不匹配 ✗  # 这就是为什么它不是 Finding——正则审查的优势：确定性、无幻觉\n\n# --- 第 4 行：调试输出 print()，触发可靠性规则 ---\nChangedLine(\"deploy.py\", 9, 'print(f\"Deploying to {env} with key {API_KEY}\")')\n  → REL-DEBUG-PRINT 匹配！  # 正则 \\b(print\\s*\\() 命中\n  # 生产代码不应包含 print() 调试输出，会污染日志或泄露敏感数据\n  → Finding: rule_id=REL-DEBUG-PRINT, severity=LOW, confidence=0.9\n\n# --- 第 5 行：shell=True 允许命令注入，触发安全规则 ---\nChangedLine(\"deploy.py\", 10, 'subprocess.run(f\"kubectl apply -f {config}\", shell=True)')\n  → SEC-SUBPROCESS-SHELL 匹配！  # 正则 \\bshell\\s*=\\s*True\\b 命中\n  # shell=True 让 subprocess 通过系统 shell 执行命令，f-string 拼接用户输入可导致命令注入\n  → Finding: rule_id=SEC-SUBPROCESS-SHELL, severity=HIGH, confidence=0.9\n\n# --- 第 6 行：SQL 字符串拼接，存在注入风险 ---\nChangedLine(\"deploy.py\", 11, \"cursor.execute(\\\"SELECT ...\\\" + env + \\\"'\\\")\")\n  → SEC-SQL-CONCAT 匹配！  # 正则 (?i)execute\\(.*\\+ 命中\n  # execute() 中使用字符串拼接（+）构建 SQL，攻击者可通过 env 变量注入恶意 SQL\n  → Finding: rule_id=SEC-SQL-CONCAT, severity=HIGH, confidence=0.9\n\n# --- 第 7 行：宽泛异常捕获，隐藏真实错误 ---\nChangedLine(\"deploy.py\", 13, \"except Exception:\")\n  → REL-EMPTY-EXCEPT 匹配！  # 正则 ^\\s*except\\s*(Exception)?: 命中\n  # 捕获 Exception 但不处理（无 as e），会吞掉所有异常包括编程错误\n  → Finding: rule_id=REL-EMPTY-EXCEPT, severity=MEDIUM, confidence=0.9\n\n# ===== 最终输出：5 个 Finding（与 02-架构教程中的表格一致） =====\n# 14 行新增代码 × 6 条规则 = 84 次正则匹配尝试，其中 5 次命中\n# 命中率低的行（如 import、os.environ.get）被安全跳过——这就是确定性规则审查的特点",
                 "caption": "PR #42 的 14 行 × 6 条规则 = 5 个 Finding 的匹配过程"
               }
             },

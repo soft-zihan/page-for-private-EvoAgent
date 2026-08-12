@@ -139,6 +139,10 @@
               }
             },
             {
+              "type": "text",
+              "text": "### FastAPI 对照实现\n\n```python\nfrom fastapi import FastAPI\nfrom fastapi.responses import JSONResponse\n\napp = FastAPI()\n\n# 路由声明：装饰器自动匹配路径和方法\n# 对比标准库：if self.path == '/api/health' 手动分发\n@app.get(\"/api/health\")\nasync def health():\n    # 直接 return 字典，FastAPI 自动序列化为 JSON 并设置 Content-Type\n    # 对比标准库：手动 json.dumps + send_response + send_header + end_headers + wfile.write\n    return {\"status\": \"ok\"}\n\n# 一行启动，uvicorn 提供异步多线程\n# 对比标准库：ThreadingHTTPServer(('0.0.0.0', 8080), APIHandler).serve_forever()\n# 运行: uvicorn main:app --host 0.0.0.0 --port 8080\n```\n\n**对比要点**：\n- **路由声明**：`@app.get(\"/path\")` 装饰器 vs `do_GET` 中的 `if path == \"/path\"` 手动分发\n- **响应返回**：直接 `return dict`，框架自动序列化 vs 手动 `json.dumps` + `send_response` + `send_header` + `end_headers` + `wfile.write` 五步\n- **服务器启动**：`uvicorn main:app` 一行命令 vs `ThreadingHTTPServer(...).serve_forever()` 两行代码\n- **代码量**：FastAPI 版本 8 行 vs 标准库版本 12 行，减少了约 33%"
+            },
+            {
               "type": "code",
               "code": {
                 "language": "python",
@@ -411,7 +415,7 @@
               "type": "code",
               "code": {
                 "language": "yaml",
-                "content": "# docker-compose.yml — 三容器编排\nservices:\n  postgres:                          # 数据库服务：存储任务记录、审查结果、审计日志等\n    image: postgres:16-alpine        # 使用 Alpine Linux 版（体积小，约 5MB vs 完整版 100MB）\n    environment:\n      POSTGRES_DB: evoagent          # 数据库名称\n      POSTGRES_USER: evoagent        # 数据库用户名\n      POSTGRES_PASSWORD: evoagent-local  # 数据库密码（仅本地开发使用）\n    volumes:\n      - postgres_data:/var/lib/postgresql/data  # 数据持久化：容器重启后数据不丢失\n    healthcheck:\n      test: [\"CMD-SHELL\", \"pg_isready -U evoagent\"]  # 健康检查：确认 PostgreSQL 已就绪\n\n  redis:                             # 消息队列服务：异步任务调度的基础设施\n    image: redis:7-alpine            # 使用 Alpine 精简版\n    command: [\"redis-server\", \"--appendonly\", \"yes\"]  # AOF 持久化：每条写操作追加到日志\n    healthcheck:\n      test: [\"CMD\", \"redis-cli\", \"ping\"]  # 健康检查：redis-cli ping 返回 PONG 表示正常\n\n  evoagent:                          # 应用服务：EvoAgent 主程序\n    build: .                         # 从当前目录的 Dockerfile 构建镜像\n    ports:\n      - \"8080:8080\"                  # 将容器 8080 端口映射到本机，供外部访问 Dashboard 和 API\n    environment:\n      EVOAGENT_DATABASE_URL: postgresql://evoagent:...@postgres:5432/evoagent  # 注意主机名是 postgres（容器名），不是 localhost\n      EVOAGENT_REDIS_URL: redis://redis:6379/0  # 注意主机名是 redis（容器名），Docker 内部 DNS 自动解析\n    depends_on:                      # 启动顺序依赖：等 postgres 和 redis 健康后才启动 evoagent\n      postgres: {condition: service_healthy}  # 等待 PostgreSQL 健康检查通过\n      redis: {condition: service_healthy}",
+                "content": "# docker-compose.yml — 三容器编排\nservices:\n  postgres:                          # 数据库服务：存储任务记录、审查结果、审计日志等\n    image: postgres:22-alpine        # 使用 Alpine Linux 版（体积小，约 5MB vs 完整版 100MB）\n    environment:\n      POSTGRES_DB: evoagent          # 数据库名称\n      POSTGRES_USER: evoagent        # 数据库用户名\n      POSTGRES_PASSWORD: evoagent-local  # 数据库密码（仅本地开发使用）\n    volumes:\n      - postgres_data:/var/lib/postgresql/data  # 数据持久化：容器重启后数据不丢失\n    healthcheck:\n      test: [\"CMD-SHELL\", \"pg_isready -U evoagent\"]  # 健康检查：确认 PostgreSQL 已就绪\n\n  redis:                             # 消息队列服务：异步任务调度的基础设施\n    image: redis:7-alpine            # 使用 Alpine 精简版\n    command: [\"redis-server\", \"--appendonly\", \"yes\"]  # AOF 持久化：每条写操作追加到日志\n    healthcheck:\n      test: [\"CMD\", \"redis-cli\", \"ping\"]  # 健康检查：redis-cli ping 返回 PONG 表示正常\n\n  evoagent:                          # 应用服务：EvoAgent 主程序\n    build: .                         # 从当前目录的 Dockerfile 构建镜像\n    ports:\n      - \"8080:8080\"                  # 将容器 8080 端口映射到本机，供外部访问 Dashboard 和 API\n    environment:\n      EVOAGENT_DATABASE_URL: postgresql://evoagent:...@postgres:5432/evoagent  # 注意主机名是 postgres（容器名），不是 localhost\n      EVOAGENT_REDIS_URL: redis://redis:6379/0  # 注意主机名是 redis（容器名），Docker 内部 DNS 自动解析\n    depends_on:                      # 启动顺序依赖：等 postgres 和 redis 健康后才启动 evoagent\n      postgres: {condition: service_healthy}  # 等待 PostgreSQL 健康检查通过\n      redis: {condition: service_healthy}",
                 "caption": "Docker Compose：三个服务 + 健康检查 + 启动依赖"
               }
             },
@@ -419,13 +423,13 @@
               "type": "code",
               "code": {
                 "language": "dockerfile",
-                "content": "# Dockerfile — 应用镜像构建（最终镜像约 150MB）\nFROM python:3.11-slim              # 基础镜像：精简版 Python 3.11（去掉了文档和测试工具）\n\nENV PYTHONDONTWRITEBYTECODE=1 \\    # 不生成 .pyc 文件，减少镜像体积\n    PYTHONUNBUFFERED=1             # 禁用输出缓冲，确保日志实时可见（方便 docker logs 调试）\n\nWORKDIR /app                       # 设置工作目录为 /app，后续 COPY 和 CMD 都相对于此目录\nCOPY requirements.txt .            # 先复制依赖文件（利用 Docker 层缓存，依赖不变时跳过安装）\nRUN pip install --no-cache-dir -r requirements.txt  # 安装 5 个依赖包，--no-cache-dir 减小镜像体积\nCOPY evoagent ./evoagent           # 复制应用核心代码\nCOPY web ./web                     # 复制前端静态文件（Dashboard）\nCOPY skills ./skills               # 复制 Skill 文件（自定义审查规则）\nEXPOSE 8080                        # 声明容器监听 8080 端口（配合 docker-compose 的 ports 映射）\nCMD [\"python\", \"-m\", \"evoagent\"]   # 容器启动命令：以模块方式运行 evoagent 包",
-                "caption": "Dockerfile：从 python:3.11-slim 构建，最终镜像约 150MB"
+                "content": "# Dockerfile — 应用镜像构建（最终镜像约 150MB）\nFROM python:3.22-slim              # 基础镜像：精简版 Python 3.11（去掉了文档和测试工具）\n\nENV PYTHONDONTWRITEBYTECODE=1 \\    # 不生成 .pyc 文件，减少镜像体积\n    PYTHONUNBUFFERED=1             # 禁用输出缓冲，确保日志实时可见（方便 docker logs 调试）\n\nWORKDIR /app                       # 设置工作目录为 /app，后续 COPY 和 CMD 都相对于此目录\nCOPY requirements.txt .            # 先复制依赖文件（利用 Docker 层缓存，依赖不变时跳过安装）\nRUN pip install --no-cache-dir -r requirements.txt  # 安装 5 个依赖包，--no-cache-dir 减小镜像体积\nCOPY evoagent ./evoagent           # 复制应用核心代码\nCOPY web ./web                     # 复制前端静态文件（Dashboard）\nCOPY skills ./skills               # 复制 Skill 文件（自定义审查规则）\nEXPOSE 8080                        # 声明容器监听 8080 端口（配合 docker-compose 的 ports 映射）\nCMD [\"python\", \"-m\", \"evoagent\"]   # 容器启动命令：以模块方式运行 evoagent 包",
+                "caption": "Dockerfile：从 python:3.22-slim 构建，最终镜像约 150MB"
               }
             },
             {
               "type": "text",
-              "text": "**为什么用 Alpine 版镜像？** `postgres:16-alpine` 和 `redis:7-alpine` 使用 Alpine Linux（约 5MB）代替完整版 Linux（约 100MB），显著减小镜像体积。`python:3.11-slim` 是 Python 的精简版，去掉了文档、测试工具等非必要组件。"
+              "text": "**为什么用 Alpine 版镜像？** `postgres:22-alpine` 和 `redis:7-alpine` 使用 Alpine Linux（约 5MB）代替完整版 Linux（约 100MB），显著减小镜像体积。`python:3.22-slim` 是 Python 的精简版，去掉了文档、测试工具等非必要组件。"
             }
           ]
         },
