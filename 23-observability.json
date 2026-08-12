@@ -1,0 +1,233 @@
+{
+  "chapters": [
+    {
+      "id": "obs-overview",
+      "title": "Agent 观测与监控",
+      "sections": [
+        {
+          "title": "背景知识：为什么 Agent 需要可观测性",
+          "anchor": "obs-background",
+          "groupTitle": "Agent 观测与监控",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 10,
+          "blocks": [
+            {
+              "type": "diagram",
+              "diagram": {
+                "language": "mermaid",
+                "content": "graph TB\n    subgraph 接入层[\"🌐 接入层\"]\n        A[HTTP API<br/>api.py] --> B[GitHub Webhook<br/>github.py]\n    end\n    subgraph 服务编排层[\"⚙️ 服务编排层\"]\n        C[ReviewService<br/>service.py]\n    end\n    subgraph 运行时层[\"🔄 运行时层\"]\n        D[ReviewHarness<br/>harness.py]\n        E[AgentRuntime<br/>runtime.py]\n        F[AgentLoop<br/>runtime.py]\n    end\n    subgraph 审查层[\"🔍 审查层\"]\n        G[MultiAgentCoordinator<br/>agents.py]\n        H[Reviewer 实现<br/>reviewer.py]\n        I[Skill Registry<br/>skills.py]\n    end\n    subgraph 持久化层[\"💾 持久化层\"]\n        J[TaskStore<br/>store.py / postgres_store.py]\n        K[TaskQueue<br/>task_queue.py]\n    end\n    subgraph 基础设施[\"🧠 基础设施\"]\n        L[ContextManager<br/>context_manager.py]\n        M[MemoryManager<br/>memory.py]\n        N[Observability<br/>observability.py]\n    end\n    A --> C\n    B --> C\n    C --> D\n    D --> E\n    E --> F\n    D --> G\n    G --> H\n    G --> I\n    C --> J\n    C --> K\n    G --> L\n    G --> M\n    D --> N\n    style N fill:#c2644a,stroke:#8b3a2a,color:#fff",
+                "caption": "EvoAgent 系统架构 — 当前章节：基础设施（观测层）"
+              }
+            },
+            {
+              "type": "text",
+              "text": "> 📍 **当前位置**：本章讲解基础设施层的可观测性实现。参考架构图了解它在系统中的位置。"
+            },
+            {
+              "type": "text",
+              "text": "传统 Web 服务的可观测性有三支柱：**Traces**（分布式追踪）、**Metrics**（指标计数）、**Logs**（日志）。Agent 系统比传统服务更需要可观测性，因为：\n\n1. **Agent 行为不确定**：同一个输入，LLM 可能给出不同的输出，需要 trace 记录每一步决策\n2. **调用链长且深**：一个审查请求经过 HTTP → Service → Harness → Runtime → AgentLoop → LLM → Tool → LLM，任何一环都可能出问题\n3. **成本敏感**：每次 LLM 调用都有 token 消耗，需要 metrics 追踪成本\n4. **需要告警**：失败率超过阈值时需要主动通知，而不是等用户投诉\n\nEvoAgent 的观测层由三个组件组成（共 ~112 行代码）：\n\n| 组件 | 文件 | 行数 | 职责 |\n|------|------|------|------|\n| `Observability` | `observability.py` | 67 | OpenTelemetry tracing，优雅降级 |\n| `Metrics` | `metrics.py` | 45 | 计数器 + 计时器 + Prometheus 导出 |\n| `AlertManager` | `observability.py` | 17 | 失败率监控 + 自动告警 |"
+            },
+            {
+              "type": "text",
+              "text": "---\n\n**观测层是理解 Agent 行为的窗口。** 接下来先看 tracing——如何追踪一个请求在系统中的完整旅程。"
+            }
+          ]
+        },
+        {
+          "title": "Observability：OpenTelemetry 追踪与优雅降级",
+          "anchor": "obs-tracing",
+          "groupTitle": "Agent 观测与监控",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 15,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "`Observability` 类的核心设计原则是**优雅降级**：如果 OpenTelemetry 已安装，发送 trace 到后端；如果未安装，所有操作变成空操作（no-op），不影响业务逻辑。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# evoagent/observability.py (67行)\n\"\"\"Tracing helpers that degrade cleanly when OpenTelemetry is not installed.\"\"\"\nimport logging\nfrom contextlib import contextmanager\nfrom contextvars import ContextVar\nfrom typing import Optional\n\n\ntrace_id_var: ContextVar[str] = ContextVar(\"trace_id\", default=\"\")  # ① 上下文变量\nlogger = logging.getLogger(\"evoagent\")\n\n\nclass Observability:\n    def __init__(self, service_name: str = \"evoagent\", endpoint: str = \"\"):\n        self.tracer = None\n        try:\n            from opentelemetry import trace                          # ② 可选导入\n            from opentelemetry.sdk.resources import Resource\n            from opentelemetry.sdk.trace import TracerProvider\n            from opentelemetry.sdk.trace.export import BatchSpanProcessor\n            provider = TracerProvider(\n                resource=Resource.create({\"service.name\": service_name})\n            )\n            if endpoint:\n                from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter\n                provider.add_span_processor(\n                    BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint))\n                )\n            trace.set_tracer_provider(provider)\n            self.tracer = trace.get_tracer(service_name)\n        except ImportError:\n            self.tracer = None                                       # ③ 降级为 None\n\n    @contextmanager\n    def span(self, name: str, trace_id: str = \"\", **attributes):\n        token = trace_id_var.set(trace_id or trace_id_var.get())     # ④ 设置 trace_id\n        if self.tracer:\n            with self.tracer.start_as_current_span(name) as span:\n                for key, value in attributes.items():\n                    if value is not None:\n                        span.set_attribute(key, value)               # ⑤ 设置 span 属性\n                try:\n                    yield span\n                except Exception as exc:\n                    span.record_exception(exc)                       # ⑥ 记录异常\n                    raise\n                finally:\n                    trace_id_var.reset(token)                        # ⑦ 恢复上下文\n        else:\n            try:\n                yield None                                           # ⑧ 降级：返回 None\n            finally:\n                trace_id_var.reset(token)",
+                "caption": "Observability 类完整实现"
+              }
+            },
+            {
+              "type": "text",
+              "text": "关键设计点逐行解析：\n\n**① ContextVar 的作用**\n`trace_id_var` 是一个上下文变量。在异步/多线程环境中，每个请求有自己的 trace_id，互不干扰。这比全局变量安全得多——想象两个请求同时处理，如果 trace_id 是全局变量，两个请求的 trace 会混在一起。\n\n**② 可选导入模式**\nOpenTelemetry 放在 `try/except ImportError` 中。这意味着 `pip install evoagent` 后不用安装 OpenTelemetry 也能运行。只有当用户配置了 `EVOAGENT_OTEL_ENDPOINT` 时，才需要安装 `opentelemetry-exporter-otlp`。\n\n**③ 降级策略**\n导入失败时 `self.tracer = None`。后续 `span()` 方法检测到 `None`，走空操作路径。\n\n**④-⑦ Span 生命周期**\n`span()` 是一个上下文管理器（`@contextmanager`）。使用时：\n```python\nwith observability.span(\"review.task\", task_id=\"abc-123\") as span:\n    # 这里的代码被 span 包裹\n    # 如果装了 OpenTelemetry，span 会记录到 trace 后端\n    # 如果没装，span 是 None，代码照常运行\n```"
+            },
+            {
+              "type": "text",
+              "text": "**优雅降级对比**：\n\n| 场景 | 有 OpenTelemetry | 无 OpenTelemetry |\n|------|-----------------|------------------|\n| `__init__` | 初始化 TracerProvider | `self.tracer = None` |\n| `span()` 进入 | 创建真实 span | `yield None` |\n| `span()` 退出 | 结束 span + 导出 | 恢复 ContextVar |\n| 异常发生 | `span.record_exception()` | 异常正常传播 |\n| 性能开销 | 网络导出（异步批处理） | 几乎为零 |\n\n这种设计让 EvoAgent 在开发环境零配置运行，在生产环境接入 Jaeger/Tempo 等 trace 后端。"
+            }
+          ]
+        },
+        {
+          "title": "Runtime 中的 Span 集成：追踪每个节点",
+          "anchor": "obs-runtime-integration",
+          "groupTitle": "Agent 观测与监控",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 12,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "`AgentRuntime.execute()` 接受一个可选的 `span_factory` 参数，在每个节点执行时创建 span。这种**依赖注入**设计让 runtime 完全不依赖 OpenTelemetry——它只接受一个 callable。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# evoagent/runtime.py — AgentRuntime.execute() 节选\ndef execute(\n    self,\n    state: Dict[str, Any],\n    nodes: List[RuntimeNode],\n    span_factory: Optional[Callable[[str, Dict[str, Any]], Any]] = None,  # ① 可选参数\n    emit: Callable = lambda *a, **kw: None,\n) -> Dict[str, Any]:\n    for node in nodes:\n        attrs = {\"node\": node.name, \"task_id\": state.get(\"task_id\", \"\")}\n        with (\n            span_factory(\"runtime.%s\" % node.name, attrs)  # ② 创建 span\n            if span_factory else nullcontext()               # ③ 无 factory 则空操作\n        ):\n            # ... 节点执行逻辑\n            state = node.handler(state)\n            # ... checkpoint 持久化",
+                "caption": "Runtime 的 span_factory 依赖注入"
+              }
+            },
+            {
+              "type": "text",
+              "text": "在 `service.py` 中，`Observability.span` 被绑定为 `span_factory`：\n\n```python\n# evoagent/service.py — ReviewService 组装\nself.observability = Observability(\n    settings.otel_service_name,\n    settings.otel_endpoint,\n)\n# ...\nruntime = AgentRuntime(\n    store=self.store,\n    span_factory=self.observability.span,  # 注入 tracing\n    # ...\n)\n```\n\n这样 runtime 产生的 trace 数据会自动发送到 OpenTelemetry 后端。在 Jaeger 中可以看到：\n\n```\nreview-task-abc123\n├── runtime.planning        (120ms)\n├── runtime.executing       (2.3s)\n│   ├── runtime.agent_loop  (1.8s)\n│   └── runtime.agent_loop  (0.4s)\n└── runtime.reviewing       (0.6s)\n```"
+            },
+            {
+              "type": "text",
+              "text": "**为什么用依赖注入而不是直接导入？**\n\n| 方案 | 优点 | 缺点 |\n|------|------|------|\n| 直接导入 `Observability` | 代码简单 | runtime 依赖 opentelemetry 包 |\n| 传入 `span_factory` | runtime 零依赖 | 多一个参数 |\n| 全局 `tracer` 变量 | 不用传参 | 测试困难，上下文混乱 |\n\nEvoAgent 选择了依赖注入——runtime 可以在完全没有 OpenTelemetry 的环境中测试和使用。"
+            }
+          ]
+        },
+        {
+          "title": "Metrics：计数器、计时器与 Prometheus 导出",
+          "anchor": "obs-metrics",
+          "groupTitle": "Agent 观测与监控",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 12,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "`Metrics` 类提供两个核心操作：**计数器**（`inc`）和**计时器**（`timer`），并支持 Prometheus 格式导出。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# evoagent/metrics.py (45行) — 完整实现\nimport threading\nimport time\nfrom collections import defaultdict\nfrom contextlib import contextmanager\n\n\nclass Metrics:\n    def __init__(self):\n        self._lock = threading.Lock()                    # ① 线程安全\n        self.counters = defaultdict(float)               # ② 计数器存储\n        self.duration_sum = defaultdict(float)           # ③ 耗时累计\n        self.duration_count = defaultdict(int)           # ④ 耗时计数\n\n    def inc(self, name: str, value: float = 1.0) -> None:\n        with self._lock:\n            self.counters[name] += value                 # ⑤ 原子递增\n\n    @contextmanager\n    def timer(self, name: str):\n        started = time.monotonic()                       # ⑥ 高精度计时\n        try:\n            yield\n        finally:\n            elapsed = time.monotonic() - started\n            with self._lock:\n                self.duration_sum[name] += elapsed       # ⑦ 累加耗时\n                self.duration_count[name] += 1           # ⑧ 递增次数\n\n    def prometheus(self) -> str:                         # ⑨ Prometheus 导出\n        with self._lock:\n            lines = []\n            for name, value in sorted(self.counters.items()):\n                lines.extend([\n                    \"# TYPE evoagent_%s counter\" % name,\n                    \"evoagent_%s %s\" % (name, value),\n                ])\n            for name, value in sorted(self.duration_sum.items()):\n                lines.extend([\n                    \"# TYPE evoagent_%s_seconds summary\" % name,\n                    \"evoagent_%s_seconds_sum %s\" % (name, value),\n                    \"evoagent_%s_seconds_count %s\" % (name, self.duration_count[name]),\n                ])\n        return \"\\n\".join(lines) + \"\\n\"\n\n\nmetrics = Metrics()                                      # ⑩ 全局单例",
+                "caption": "Metrics 类完整实现"
+              }
+            },
+            {
+              "type": "text",
+              "text": "设计要点：\n\n**① 线程安全**：EvoAgent 使用 `ThreadingHTTPServer`，多个请求可能同时触发 `metrics.inc()`。`threading.Lock()` 保证计数器不会丢失更新。\n\n**⑥ `time.monotonic()`**：单调时钟，不受系统时间调整影响。不要用 `time.time()` 计时——如果 NTP 在计时期间同步了时钟，结果可能是负数。\n\n**⑩ 全局单例**：`metrics = Metrics()` 在模块级别创建。所有文件 `from .metrics import metrics` 后共享同一个实例。\n\n**实际使用场景**（来自 `service.py`）：\n```python\nfrom .metrics import metrics\n\n# 计数：影子审查总数\nmetrics.inc(\"shadow_reviews_total\")\n\n# 计数：影子审查失败数\nmetrics.inc(\"shadow_reviews_failed_total\")\n\n# 计时：审查耗时\nwith metrics.timer(\"review_duration\"):\n    report = reviewer.review(diff, parsed)\n```"
+            },
+            {
+              "type": "text",
+              "text": "**Prometheus 导出格式**\n\n`/metrics` 端点调用 `metrics.prometheus()` 返回标准 Prometheus 文本：\n\n```\n# TYPE evoagent_shadow_reviews_total counter\nevoagent_shadow_reviews_total 42.0\n# TYPE evoagent_shadow_reviews_failed_total counter\nevoagent_shadow_reviews_failed_total 3.0\n# TYPE evoagent_review_duration_seconds summary\nevoagent_review_duration_seconds_sum 156.7\nevoagent_review_duration_seconds_count 42\n```\n\nPrometheus 抓取后可以计算：\n- **平均审查耗时**：`rate(review_duration_seconds_sum) / rate(review_duration_seconds_count)`\n- **失败率**：`rate(shadow_reviews_failed_total) / rate(shadow_reviews_total)`\n- **P99 耗时**：需要直方图（当前实现是 summary，只支持平均值）"
+            }
+          ]
+        },
+        {
+          "title": "AlertManager：失败率监控与自动告警",
+          "anchor": "obs-alerts",
+          "groupTitle": "Agent 观测与监控",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 8,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "`AlertManager` 定期评估审查失败率，超过阈值时写入告警记录。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# evoagent/observability.py — AlertManager (17行)\nclass AlertManager:\n    def __init__(self, store, failure_rate: float = .2, min_samples: int = 10):\n        self.store = store\n        self.failure_rate = failure_rate        # ① 失败率阈值（默认 20%）\n        self.min_samples = min_samples          # ② 最小样本数（默认 10）\n\n    def evaluate(self, tenant_id: str) -> None:\n        stats = self.store.dashboard_stats(tenant_id)   # ③ 从 store 获取统计\n        if stats[\"tasks_total\"] >= self.min_samples:     # ④ 样本足够才评估\n            rate = stats[\"tasks_failed\"] / stats[\"tasks_total\"]\n            if rate > self.failure_rate:                 # ⑤ 超过阈值\n                self.store.create_alert(\n                    tenant_id,\n                    \"review-failure-rate\",               # ⑥ 告警类型\n                    \"critical\",                          # ⑦ 严重级别\n                    \"Review failure rate %.1f%% exceeds the %.1f%% threshold.\"\n                    % (rate * 100, self.failure_rate * 100),\n                )",
+                "caption": "AlertManager 实现"
+              }
+            },
+            {
+              "type": "text",
+              "text": "**设计决策**：\n\n**② 为什么需要 `min_samples`？**\n如果只处理了 2 个任务、失败了 1 个，失败率是 50%——但这不意味着系统有问题，只是样本太小。`min_samples=10` 确保至少有 10 个任务后才开始告警，避免\"小样本误报\"。\n\n**③ 数据来源**\n`store.dashboard_stats()` 从数据库聚合：\n```sql\nSELECT\n    COUNT(*) as tasks_total,\n    SUM(CASE WHEN state = 'FAILED' THEN 1 ELSE 0 END) as tasks_failed\nFROM tasks\nWHERE tenant_id = %s\n```\n\n**⑤-⑦ 告警写入**\n告警存储到 `alerts` 表（不是日志），可以通过 `/api/alerts` 端点查询。告警类型是 `review-failure-rate`，严重级别是 `critical`。\n\n**调用时机**：`AlertManager.evaluate()` 在每次审查任务完成后被调用（由 `service.py` 触发），不是定时任务。这意味着告警是**事件驱动**的，不是轮询的。"
+            },
+            {
+              "type": "table",
+              "table": {
+                "headers": ["配置项", "默认值", "说明"],
+                "rows": [
+                  ["alert_failure_rate", "0.2", "失败率阈值（20%）"],
+                  ["alert_min_samples", "10", "最小样本数"],
+                  ["otel_service_name", "evoagent", "OpenTelemetry 服务名"],
+                  ["otel_endpoint", "（空）", "OTLP 导出端点（空=不导出）"]
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "title": "Service 层组装：观测组件如何连接",
+          "anchor": "obs-assembly",
+          "groupTitle": "Agent 观测与监控",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 10,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "`ReviewService.__init__()` 是观测组件的组装点。它创建 `Observability`、`AlertManager`，并将它们注入到 runtime 和 harness 中。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# evoagent/service.py — ReviewService 组装观测组件（简化）\nfrom .metrics import metrics\nfrom .observability import AlertManager, Observability\n\nclass ReviewService:\n    def __init__(self, settings, store, ...):\n        # ① 创建 Observability 实例\n        self.observability = Observability(\n            settings.otel_service_name,   # 默认 \"evoagent\"\n            settings.otel_endpoint,       # 默认 \"\"（不导出）\n        )\n\n        # ② 创建 AlertManager\n        self.alerts = AlertManager(\n            self.store,\n            settings.alert_failure_rate,  # 默认 0.2\n            settings.alert_min_samples,   # 默认 10\n        )\n\n        # ③ 注入到 ReviewHarness\n        self.harness = ReviewHarness(\n            store=self.store,\n            observability=self.observability,  # tracing\n            # ...\n        )\n\n        # ④ 注入到 AgentRuntime\n        runtime = AgentRuntime(\n            store=self.store,\n            span_factory=self.observability.span,  # span 工厂\n            # ...\n        )\n\n    # ⑤ 审查完成时触发告警评估\n    def _on_task_complete(self, tenant_id):\n        self.alerts.evaluate(tenant_id)\n        metrics.inc(\"reviews_total\")",
+                "caption": "Service 层组装观测组件"
+              }
+            },
+            {
+              "type": "diagram",
+              "diagram": {
+                "language": "mermaid",
+                "content": "graph LR\n    subgraph 观测组件\n        O[Observability] -->|span_factory| R[AgentRuntime]\n        O -->|observability| H[ReviewHarness]\n        M[Metrics] -->|inc/timer| S[ReviewService]\n        A[AlertManager] -->|evaluate| S\n    end\n    subgraph 数据流\n        R -->|span 数据| OT[OpenTelemetry Backend]\n        S -->|计数器| PROM[Prometheus /metrics]\n        A -->|告警记录| DB[(alerts 表)]\n    end\n    style O fill:#c2644a,stroke:#8b3a2a,color:#fff\n    style M fill:#5b8c5a,stroke:#3a6a3a,color:#fff\n    style A fill:#c4944a,stroke:#a4742a,color:#fff",
+                "caption": "观测组件数据流"
+              }
+            },
+            {
+              "type": "text",
+              "text": "**HTTP 端点暴露**\n\n`api.py` 提供两个观测相关端点：\n\n| 端点 | 方法 | 返回 |\n|------|------|------|\n| `/metrics` | GET | Prometheus 格式文本 |\n| `/api/dashboard` | GET | JSON 统计（任务数、失败数、告警数） |\n\n`/metrics` 端点实现：\n```python\n# api.py — do_GET 路由\ndef do_GET(self):\n    if self.path == \"/metrics\":\n        body = metrics.prometheus()\n        self._send(200, \"text/plain; version=0.0.4\", body.encode())\n```\n\n`/api/dashboard` 端点返回：\n```json\n{\n  \"tasks_total\": 142,\n  \"tasks_failed\": 8,\n  \"tasks_pending\": 3,\n  \"alerts_active\": 1,\n  \"uptime_seconds\": 86400\n}\n```"
+            }
+          ]
+        },
+        {
+          "title": "生产环境部署：从开发到监控全链路",
+          "anchor": "obs-production",
+          "groupTitle": "Agent 观测与监控",
+          "difficulty": "advanced",
+          "estimatedMinutes": 15,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "生产环境部署 EvoAgent 时，推荐的可观测性技术栈：\n\n| 信号 | 开源方案 | 商业方案 | EvoAgent 配置 |\n|------|----------|----------|---------------|\n| Traces | Jaeger / Tempo | Datadog / New Relic | `EVOAGENT_OTEL_ENDPOINT=http://jaeger:4318` |\n| Metrics | Prometheus + Grafana | Datadog / CloudWatch | 抓取 `/metrics` 端点 |\n| Logs | Loki / ELK | Datadog / CloudWatch | Python logging + JSON 格式 |\n| Alerts | Alertmanager | PagerDuty / OpsGenie | `AlertManager` → webhook |"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "yaml",
+                "content": "# docker-compose.yml — 可观测性技术栈（添加）\nservices:\n  evoagent:\n    environment:\n      EVOAGENT_OTEL_ENDPOINT: http://jaeger:4318   # ① 发送 trace\n      EVOAGENT_OTEL_SERVICE_NAME: evoagent-prod\n      EVOAGENT_ALERT_FAILURE_RATE: \"0.15\"          # ② 降低告警阈值\n      EVOAGENT_ALERT_MIN_SAMPLES: \"20\"\n\n  jaeger:                                          # ③ Jaeger 全栈\n    image: jaegertracing/all-in-one:latest\n    ports:\n      - \"16686:16686\"    # Jaeger UI\n      - \"4318:4318\"      # OTLP HTTP\n\n  prometheus:                                      # ④ Prometheus\n    image: prom/prometheus:latest\n    volumes:\n      - ./prometheus.yml:/etc/prometheus/prometheus.yml\n    ports:\n      - \"9090:9090\"\n\n  grafana:                                         # ⑤ Grafana 可视化\n    image: grafana/grafana:latest\n    ports:\n      - \"3000:3000\"\n    environment:\n      GF_SECURITY_ADMIN_PASSWORD: admin",
+                "caption": "docker-compose.yml 添加可观测性技术栈"
+              }
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "yaml",
+                "content": "# prometheus.yml — Prometheus 抓取配置\nglobal:\n  scrape_interval: 15s\n\nscrape_configs:\n  - job_name: 'evoagent'\n    static_configs:\n      - targets: ['evoagent:8080']                 # ① 抓取 /metrics\n    metrics_path: '/metrics'\n    scrape_interval: 10s",
+                "caption": "Prometheus 抓取配置"
+              }
+            },
+            {
+              "type": "text",
+              "text": "**推荐的 Grafana Dashboard 面板**：\n\n| 面板 | PromQL | 说明 |\n|------|--------|------|\n| 审查 QPS | `rate(evoagent_reviews_total[5m])` | 每秒审查数 |\n| 失败率 | `rate(evoagent_shadow_reviews_failed_total[5m]) / rate(evoagent_shadow_reviews_total[5m])` | 审查失败比例 |\n| P50 耗时 | `histogram_quantile(0.5, rate(evoagent_review_duration_seconds_bucket[5m]))` | 中位数耗时 |\n| P99 耗时 | `histogram_quantile(0.99, rate(evoagent_review_duration_seconds_bucket[5m]))` | 长尾耗时 |\n| 活跃告警 | `evoagent_alerts_active` | 当前告警数 |"
+            },
+            {
+              "type": "text",
+              "text": "---\n\n**观测层让 Agent 行为透明。** 但评测系统如何量化审查质量？详见 18-evaluation 教程——它讲解了 `EndToEndEvaluationHarness` 如何用 precision/recall/F1 评估审查准确性，以及 `comparison_summary` 如何设置发布门禁。"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
