@@ -1,246 +1,313 @@
 {
   "id": "20-interview",
   "title": "面试准备",
-  "description": "高频面试问答 + 真实面经（百度、字节、淘天）",
+  "description": "Agent 开发核心面试题 + 真实面经",
   "chapters": [
     {
-      "title": "高频面试问答",
+      "title": "一、Agent 架构与编排",
       "sections": [
         {
-          "title": "项目概述与架构",
-          "anchor": "overview-arch",
-          "groupTitle": "高频面试问答",
-          "difficulty": "intermediate",
-          "estimatedMinutes": 15,
+          "title": "Agent 架构与编排",
+          "anchor": "agent-arch",
+          "groupTitle": "面试核心问答",
+          "difficulty": "advanced",
+          "estimatedMinutes": 25,
           "blocks": [
             {
               "type": "text",
-              "text": "以下问题覆盖 EvoAgent 的核心架构设计，点击展开查看答案要点。"
+              "text": "以下问题围绕 EvoAgent 的实际架构，考察 Agent 开发的通用设计能力。"
             },
             {
               "type": "question",
-              "category": "项目概述",
-              "question": "这个项目是做什么的？",
-              "answer": "它是一个面向 Pull Request 的自动代码审查平台。输入是 unified diff，系统只定位新增行，让安全、可靠性、动态 Skill 和可选 LLM Reviewer 并行审查。Harness 管理状态、预算、trace 和落库。结果可以通过 JSON、Markdown、Dashboard 或 GitHub 评论查看。"
+              "category": "架构模式",
+              "question": "你的 Agent 用了什么执行模式？和 ReAct、Plan-and-Execute 有什么关系？",
+              "answer": "EvoAgent 混合使用了两种模式。\n\n**整体编排是 Plan-and-Execute**：ReviewHarness 定义了一个三节点的状态机——PLANNING → EXECUTING → REVIEWING。PLANNING 节点解析 diff 并制定审查计划，EXECUTING 节点调用 MultiAgentCoordinator 执行审查，REVIEWING 节点验证和汇总结果。这不是一个自由循环，而是有明确阶段的结构化流程。\n\n**Agent 内部是 ReAct**：AgentLoop 实现经典的 Reasoning-Action 循环。每一轮，Agent 先思考（调用 LLM 决定下一步），然后行动（调用 Tool 或直接返回 final 结果），再观察结果，循环直到达到 max_steps 或返回 final。\n\n**为什么不用纯 ReAct？** 纯 ReAct 把规划和执行混在一个循环里，对于代码审查这种有明确阶段的场景，Plan-and-Execute 更容易做 checkpoint 恢复和预算控制。如果 planning 阶段失败，不需要重新执行审查。\n\n**为什么 Agent 内部不用 Plan-and-Execute？** AgentLoop 需要动态决定调用哪个 Tool 或直接返回结果，这种决策粒度适合 ReAct 的循环模式，而不是固定的节点序列。"
             },
             {
               "type": "question",
-              "category": "架构设计",
-              "question": "这个项目为什么要用多 Agent？",
-              "answer": "安全、可靠性和代码质量的判断规则不同。拆成多个 Reviewer 后，每个能力可以独立注册、失败和替换，Coordinator 再统一去重和门禁。"
+              "category": "运行时抽象",
+              "question": "Harness 和 AgentRuntime 为什么拆成两层？如果合成一层有什么问题？",
+              "answer": "两层解决的是两个独立问题。\n\n**ReviewHarness 是业务外壳**：它管理审查任务的状态机（PENDING → PLANNING → EXECUTING → REVIEWING → SUCCESS/FAILED）、diff 解析、报告组装、trace 记录和失败落库。它知道自己在做代码审查。\n\n**AgentRuntime 是通用执行器**：它只关心节点执行、步骤预算（max_steps）、时间预算（timeout）、checkpoint 持久化和取消检查。它完全不知道上层在做什么——可以是代码审查，也可以是文档生成。\n\n**合成一层的问题**：如果 ReviewHarness 直接管理步骤预算和 checkpoint，这些通用逻辑会和业务逻辑（diff 解析、Finding 验证）混在一起。换一个工作流就得重写一遍。事实上，MultiAgentCoordinator 内部也用了同一个 AgentRuntime，证明了这个抽象的可复用性。\n\n**面试延伸**：这和 LangGraph 的设计思路类似——StateGraph 定义节点和边（类似 Harness），而每个节点内部可以有独立的执行逻辑（类似 Runtime）。"
             },
             {
               "type": "question",
-              "category": "架构设计",
-              "question": "Security Agent 和 Reliability Agent 是两个模型吗？",
-              "answer": "不是。当前它们共享 LocalRuleReviewer，Security 过滤 SEC-，Reliability 过滤 REL-。配置 LLM 后会多一个独立的 OpenAICompatibleReviewer。动态 Skill 也是独立 Reviewer。"
+              "category": "状态机",
+              "question": "ReviewHarness 的状态机有哪几个状态？状态迁移时如果发生崩溃，怎么恢复？",
+              "answer": "状态机有 7 个状态：PENDING → PLANNING → EXECUTING → REVIEWING → SUCCESS/FAILED/CANCELLED。\n\n**合法迁移**：\n- PENDING 可以到 PLANNING、FAILED、CANCELLED\n- PLANNING 可以到 EXECUTING、FAILED、CANCELLED\n- EXECUTING 可以到 REVIEWING、FAILED、CANCELLED\n- REVIEWING 可以到 SUCCESS、FAILED、CANCELLED\n- 任何状态都可以到 FAILED 或 CANCELLED\n\n**崩溃恢复**：每个节点执行前会保存 checkpoint（以 task_id + node 为主键）。如果 Worker 在 EXECUTING 阶段崩溃，重启后同一个任务可以从 EXECUTING 的 checkpoint 恢复，不需要重新走 PLANNING。\n\n**关键细节**：checkpoint 只在同一个任务内复用。每次新的 API 调用或 Webhook delivery 都会创建新的 UUID 任务，不会跨任务复用 checkpoint。这避免了过期结果的污染。\n\n**面试延伸**：这和 Temporal/Cadence 的 workflow 恢复机制类似——活动（Activity）失败后可以从最近的检查点恢复，而不是重头开始。"
             },
             {
               "type": "question",
-              "category": "数据流",
-              "question": "一段 diff 进入系统后发生了什么？",
-              "answer": "API 校验请求，Service 创建任务，Harness 转到 PLANNING，DiffParser 提取文件和新增行，Coordinator 并发运行 Reviewer，合并 Finding 后计算整体风险，最后把报告和 trace 写入数据库。"
+              "category": "终止条件",
+              "question": "你的 Agent Loop 每轮执行什么？怎样判断什么时候该停下来？",
+              "answer": "AgentLoop 每轮执行一个 ReAct 循环：\n1. **Think**：调用 LLM，模型返回 tool_call（需要调用工具）或 final_answer（直接返回结果）\n2. **Act**：如果是 tool_call，通过 ToolRegistry 调用对应工具，得到结果\n3. **Observe**：把工具结果追加到消息历史\n4. 回到 Think\n\n**停止条件**：\n- 模型返回 final_answer（正常结束）\n- 达到 max_steps（步骤预算耗尽）\n- 超过 timeout（时间预算耗尽）\n- 外部取消信号（cancelled 标志）\n\n**max_steps 的细节**：它是一个内部步骤预算，不等于最终 trace 行数。状态迁移、节点尝试和收尾对步骤号的使用不完全相同。排查预算问题时需要查看 task[\"trace\"] 和 checkpoint 的 attempt 字段。\n\n**为什么不用 token 计数做预算？** Token 计数需要 Provider 返回 usage 字段，不同 Provider 格式不同。步骤数更简单可靠，也更容易在不同模型间比较。"
             },
             {
               "type": "question",
-              "category": "架构设计",
-              "question": "Harness 解决什么问题？",
-              "answer": "Harness 把任务生命周期从具体审查能力里拿出来。Reviewer 只管返回 Finding，不直接改任务状态、写数据库或发布 GitHub 评论。它统一负责状态、步骤预算、时间检查、diff 解析、报告组装、成功落库和失败落库。"
+              "category": "多 Agent 协作",
+              "question": "为什么多 Agent 审查不是简单地让多个模型各跑一遍取投票？",
+              "answer": "简单投票有几个问题：\n\n**1. 错误相关性**：如果多个 Specialist 用同一个底层模型，它们的错误会高度相关。三个 Agent 都基于 GPT-4，同一个幻觉三个都会犯，投票没有意义。\n\n**2. 没有质疑机制**：投票只统计数量，不验证质量。一个 Specialist 报了假阳性，另外两个没报，投票结果是不报——但假阳性没有被发现。\n\n**EvoAgent 的流水线模式**：\n- **Planner**：决定审查分配（哪些文件给哪些 Specialist）\n- **Specialist**：并行执行审查（Security/Reliability/LLM/Skill）\n- **Critic**：质疑每个 Finding（证据是否在新增行、解释是否具体、修复是否可执行）\n- **EvidenceAgent**：独立复核证据（重新读取新增行确认问题可复现）\n- **Verifier**：检查可信度和修复建议安全性\n- **Synthesizer**：合并去重，生成最终报告\n\n**关键区别**：Critic 和 EvidenceAgent 是独立的门禁，不是另一个投票者。高风险结论必须通过多层验证才能进入报告，而不是简单多数通过。\n\n**面试延伸**：这对应了 Independent Verification 和 Critic-Reflection 两种多 Agent 模式。EvoAgent 把它们组合在了一条流水线里。"
             },
             {
               "type": "question",
-              "category": "架构设计",
-              "question": "Harness 和 ReviewService 的边界是什么？",
-              "answer": "1. ReviewService 负责组装 Store、Registry、Reviewer、Harness、GitHub、Fixer、Evolution 和 Queue。\n2. Harness 负责一轮审查怎么执行。Service 还负责输入校验、同步异步选择、Webhook、评论、修复和反馈。"
+              "category": "Critic 模式",
+              "question": "MultiAgentCoordinator 里的 Critic 角色为什么必须存在？去掉它会怎样？",
+              "answer": "Critic 解决的是 **LLM 输出的结构性缺陷**。\n\n**没有 Critic 的问题**：Specialist 返回的 Finding 可能包含：\n- 位置错误：报告的行号不在新增行范围内\n- 证据不足：引用的代码在 diff 中找不到\n- 修复不可执行：建议的 fix 引入了新问题或语法错误\n- 解释模糊：只说「这里有问题」但不解释为什么\n\n**Critic 的检查清单**：\n- 位置是否在新增行集合中？\n- 引用的证据能否在 diff 中找到？\n- 解释是否具体到可以行动？\n- 修复建议是否可执行（不是 LLM 幻觉的代码）？\n- 高风险问题是否有独立证据？\n\n**去掉 Critic 的后果**：假阳性会直接进入报告。用户看到大量误报后会对系统失去信任，即使真阳性也会被忽略。\n\n**面试延伸**：Critic-Reflection 模式在 AutoGPT 和 Reflexion 论文中被广泛验证。核心思想是：生成-验证-修正的循环比单次生成质量高得多。EvoAgent 把这个循环显式化为流水线中的独立角色。"
             },
             {
               "type": "question",
-              "category": "设计决策",
-              "question": "为什么只检查新增行？",
-              "answer": "PR 审查的重点是本次变更引入的问题。只检查新增行能减少历史问题噪声，也能保证 LLM 返回的位置对应 GitHub 新文件行号。代价是删除权限检查、上下文组合和跨行问题可能漏报。"
-            },
-            {
-              "type": "question",
-              "category": "设计决策",
-              "question": "Diff 行号怎么保证准确？",
-              "answer": "解析器从 hunk 头读取新文件起始行号。新增行和上下文行会让新文件行号加一，删除行不会增加新文件行号。测试用包含删除、新增和上下文的 diff 验证了行号。"
-            },
-            {
-              "type": "question",
-              "category": "设计决策",
-              "question": "为什么不用 AST 解析 diff？",
-              "answer": "当前输入可能包含多种语言，项目先用 unified diff 文本解析解决通用定位。本地规则也主要是跨语言文本模式。如果做可靠自动修复，应该按语言引入 AST 或 CST。文本正则更适合检测，不适合复杂改写。"
-            }
-          ]
-        },
-        {
-          "title": "LLM 与规则配合",
-          "anchor": "llm-rules",
-          "groupTitle": "高频面试问答",
-          "difficulty": "intermediate",
-          "estimatedMinutes": 12,
-          "blocks": [
-            {
-              "type": "question",
-              "category": "混合架构",
-              "question": "为什么保留本地规则？",
-              "answer": "本地规则不需要网络、延迟低、行为稳定。即使没有 API key 或 Provider 故障，系统仍能发现几类明确问题。它也是 LLM Reviewer 的确定性安全底线。"
-            },
-            {
-              "type": "question",
-              "category": "混合架构",
-              "question": "LLM Reviewer 和本地规则怎么配合？",
-              "answer": "它们拿到同一份 diff 并行工作。Coordinator 按 (path, line, rule_id) 合并。同一键保留置信度更高的结果。LLM 不会覆盖本地规则，只是增加更多 Finding。"
-            },
-            {
-              "type": "question",
-              "category": "容错",
-              "question": "LLM 返回错误行号怎么办？",
-              "answer": "OpenAICompatibleReviewer 建立所有新增行的集合。模型返回的 (path, line) 不在集合中时，Finding 直接丢弃。Coordinator 还会再做一次位置门禁。"
-            },
-            {
-              "type": "question",
-              "category": "容错",
-              "question": "LLM 不返回 JSON 怎么办？",
-              "answer": "响应 choices[0].message.content 必须能解析为 JSON。字段缺失、JSON 解析失败或网络异常都会让这个 Reviewer 抛 RuntimeError。如果其他 Reviewer 正常，任务可能降级成功。所有 Agent 都失败时任务变成 FAILED。"
-            },
-            {
-              "type": "question",
-              "category": "设计决策",
-              "question": "为什么 temperature=0？",
-              "answer": "代码审查需要可重复性。低随机性有利于同一 diff 得到稳定结构，也方便回放比较提示词。这不能保证完全确定，因为 Provider 和模型版本仍可能变化。"
-            },
-            {
-              "type": "question",
-              "category": "设计决策",
-              "question": "为什么要求每个 Finding 都有 fix 和 test？",
-              "answer": "只有问题标题而没有修复和验证方式，很难行动。Coordinator 会过滤 fix 或 test 为空的 Finding。这也是对 LLM 输出质量的一层硬约束。"
-            }
-          ]
-        },
-        {
-          "title": "工程实现细节",
-          "anchor": "engineering",
-          "groupTitle": "高频面试问答",
-          "difficulty": "advanced",
-          "estimatedMinutes": 12,
-          "blocks": [
-            {
-              "type": "question",
-              "category": "运行时",
-              "question": "Harness 的超时是真正的硬超时吗？",
-              "answer": "不是。它只在状态迁移时比较累计时间。正在执行的普通 Skill 不会被中途杀掉。LLM 请求有 urllib timeout，但线程本身没有隔离和强制终止。"
-            },
-            {
-              "type": "question",
-              "category": "API 设计",
-              "question": "为什么要同时有同步和异步 API？",
-              "answer": "同步模式便于调试，调用完成后直接拿报告。异步模式适合 Webhook、长 diff 和外部模型。调用方先拿 task ID，再查询进度。"
-            },
-            {
-              "type": "question",
-              "category": "容错",
-              "question": "Redis 挂了怎么办？",
-              "answer": "配置 Redis 时，服务启动会 ping()。连接失败会导致启动失败，不会自动退回内存队列。未配置 Redis 时才使用内存模式。"
-            },
-            {
-              "type": "question",
-              "category": "存储",
-              "question": "为什么任务表不保存完整 diff？",
-              "answer": "任务表只保存 diff 大小和 SHA-256，可以减少源码长期落库。"
-            },
-            {
-              "type": "question",
-              "category": "存储",
-              "question": "SQLite 和 PostgreSQL 怎么切换？",
-              "answer": "EVOAGENT_DATABASE_URL 以 postgres:// 或 postgresql:// 开头时使用 PostgreSQL，否则使用 EVOAGENT_DB_PATH 指定的 SQLite。"
-            },
-            {
-              "type": "question",
-              "category": "并发",
-              "question": "PostgreSQL 为什么用 advisory lock？",
-              "answer": "同一个 Skill 并发创建版本时，都可能先读到相同最大版本号。事务级 advisory lock 用 skill_name 做锁键，让版本分配串行化。"
-            },
-            {
-              "type": "question",
-              "category": "扩展性",
-              "question": "动态 Skill 怎么开发？",
-              "answer": "继承 Reviewer，实现 review(diff, parsed)，并提供 create_skill()。Finding 必须指向新增行，而且要有 fix 和 test。把文件放在 skills/<name>/skill.py，重载后生效。"
-            }
-          ]
-        },
-        {
-          "title": "安全、修复与进化",
-          "anchor": "security-evolution",
-          "groupTitle": "高频面试问答",
-          "difficulty": "advanced",
-          "estimatedMinutes": 12,
-          "blocks": [
-            {
-              "type": "question",
-              "category": "安全",
-              "question": "Webhook 怎么防伪造？",
-              "answer": "服务用 Secret 和原始 body 计算 HMAC-SHA256，再和 X-Hub-Signature-256 常量时间比较。如果 Secret 未配置，接口返回 503，不会无验证接收事件。"
-            },
-            {
-              "type": "question",
-              "category": "GitHub 集成",
-              "question": "为什么评论写到 issue comments？",
-              "answer": "GitHub 的 Pull Request 同时也是 Issue。pull_request.issue_url + \"/comments\" 可以发布普通 PR 评论。当前不是 inline review comment，不能精确挂在某条代码行上。"
-            },
-            {
-              "type": "question",
-              "category": "自动修复",
-              "question": "自动修复为什么不直接用 LLM patch？",
-              "answer": "LLM patch 风险大，需要代码上下文、语法校验、测试和人工门禁。当前项目先只做三类白名单文本修复。这种方式覆盖面小，但行为更容易解释。"
-            },
-            {
-              "type": "question",
-              "category": "自动修复",
-              "question": "自动修复会直接改用户分支吗？",
-              "answer": "不会。系统创建 evoagent/fix-pr-* 新分支。它也不会自动创建 PR，只返回分支和提交信息。"
-            },
-            {
-              "type": "question",
-              "category": "自动修复",
-              "question": "修复前会检查 PR 是否更新吗？",
-              "answer": "不会。它读取调用时的 PR head，但任务没有保存审查时的 head SHA，无法判断报告是否已经过期。这是当前自动修复的重要并发风险。"
-            },
-            {
-              "type": "question",
-              "category": "进化",
-              "question": "为什么要保存失败反馈？",
-              "answer": "误报、漏报和坏修复是改进 Reviewer 的真实信号。只保存任务成功率看不到质量问题。项目把反馈放进 failure_cases，再生成提示词候选。"
-            },
-            {
-              "type": "question",
-              "category": "进化",
-              "question": "调用方能不能直接传一个高分让候选上线？",
-              "answer": "不能。API 兼容接收可选 regression_score，但激活逻辑明确忽略它。运行记录只保存 external_regression_score_ignored，说明调用方传过这个值。"
-            },
-            {
-              "type": "question",
-              "category": "进化",
-              "question": "为什么需要 holdout？",
-              "answer": "如果候选知道全部 validation 案例，它可以针对样本写规则，公开分数很高但泛化变差。Holdout 不暴露案例明细，用来检查受保护指标是否退化。"
-            },
-            {
-              "type": "question",
-              "category": "进化",
-              "question": "怎么回滚提示词？",
-              "answer": "调用版本激活接口。Store 会取消同一个 Skill 的旧活动版本，再激活指定版本。Service 重载后，新建的 LLM Reviewer 使用这个提示词。"
+              "category": "架构可替换性",
+              "question": "如果让你把这套系统从审查代码改成审查设计文档，哪些模块需要改，哪些不用？",
+              "answer": "**需要改的**：\n- DiffParser：设计文档不是 unified diff，需要换成文档解析器\n- Reviewer 实现：LocalRuleReviewer 的规则是针对代码的（eval、shell=True），需要换成文档审查规则\n- Prompt：LLM Reviewer 的 system prompt 和输出 schema 需要重新设计\n- 自动修复：当前的白名单文本修复是针对代码的\n\n**不需要改的**：\n- ReviewHarness：状态机、预算控制、checkpoint 完全不关心审查对象是什么\n- AgentRuntime：节点执行、步骤预算、超时检查是通用的\n- TaskStore/TaskQueue：任务存储和队列与业务无关\n- ContextManager/MemoryManager：上下文和记忆管理是通用的\n- EvolutionEngine：反馈驱动的进化机制不依赖具体业务\n\n**这证明了架构的可替换性**：核心运行时和基础设施层完全不关心「审查什么」，只需要替换接入层和审查层的实现。这是分层架构的直接收益。"
             }
           ]
         }
       ]
     },
     {
-      "title": "真实面经：百度 Agent 开发一面",
+      "title": "二、Prompt Engineering 与 LLM 交互",
       "sections": [
         {
-          "title": "百度一面真题",
+          "title": "Prompt Engineering 与 LLM 交互",
+          "anchor": "prompt-llm",
+          "groupTitle": "面试核心问答",
+          "difficulty": "advanced",
+          "estimatedMinutes": 20,
+          "blocks": [
+            {
+              "type": "question",
+              "category": "Prompt 设计",
+              "question": "你的 LLM Reviewer 的 Prompt 结构是什么样的？为什么不直接把整个 diff 塞给模型？",
+              "answer": "Prompt 结构分三层：\n\n**System Prompt**：定义角色（代码审查专家）、输出格式（JSON schema，包含 rule_id、severity、path、line、evidence、explanation、fix、test）、约束（只报告新增行引入的问题）。\n\n**User Prompt**：包含当前 diff 的具体内容——文件头、hunk、新增行和上下文。\n\n**为什么不直接塞整个 diff？**\n1. **上下文窗口限制**：大 PR 可能有几千行 diff，超过模型窗口\n2. **注意力稀释**：diff 越长，模型对每个 hunk 的关注度越低\n3. **成本控制**：token 数量直接影响 API 费用\n4. **审查质量**：EvoAgent 按文件拆分，每个 Specialist 只看分配给自己的部分，可以并行处理\n\n**Diff 压缩策略**：当 diff 超过预算时，优先保留风险分数较高的 hunk。hunk 内部重点保留新增行、命中风险关键词的代码和相邻上下文，其余替换为省略标记。文件头和 hunk 位置信息始终保留，避免压缩后无法定位问题。"
+            },
+            {
+              "type": "question",
+              "category": "LLM 确定性",
+              "question": "temperature=0 能保证输出完全确定吗？什么情况下同一个 prompt 两次调用结果不同？",
+              "answer": "**不能完全保证**。temperature=0 只是把采样概率集中在最高概率的 token 上，但以下因素仍会导致不确定性：\n\n1. **浮点精度**：GPU 上的浮点运算不是完全确定的，微小的数值差异可能导致不同的 top token\n2. **Provider 缓存**：部分 Provider 会缓存请求结果，缓存失效后可能返回略有不同的结果\n3. **模型版本漂移**：Provider 可能在不通知的情况下更新模型版本\n4. **批量推理**：某些 Provider 的批量推理模式会引入额外的随机性\n5. **top_p 和 frequency_penalty**：即使 temperature=0，这些参数仍可能影响采样\n\n**EvoAgent 的处理**：temperature=0 是一个合理的默认值，它让输出在大多数情况下稳定，便于回放比较。但系统不依赖确定性——评测使用数据集指纹而不是 prompt 输出来验证一致性。\n\n**面试延伸**：这是一个常见的面试陷阱。回答「temperature=0 就是确定的」说明对 LLM 实现细节缺乏了解。"
+            },
+            {
+              "type": "question",
+              "category": "容错",
+              "question": "模型返回的内容不是合法 JSON 怎么办？你做了哪些防御？",
+              "answer": "EvoAgent 做了多层防御：\n\n**第一层：解析容错**\n- 尝试从返回内容中提取 JSON（处理模型在 JSON 前后加了说明文字的情况）\n- 字段缺失时使用默认值或跳过该 Finding\n\n**第二层：降级策略**\n- 如果 JSON 解析完全失败，这个 Reviewer 抛 RuntimeError\n- 但任务不会立即失败——Coordinator 会检查其他 Reviewer 是否还有结果\n- 如果至少有一个 Reviewer 返回了有效结果，任务降级成功（少了部分 Finding）\n- 只有所有 Reviewer 都失败时，任务才变成 FAILED\n\n**第三层：记录与反馈**\n- 解析失败的 Reviewer 会被记录到 trace\n- 如果持续失败，会触发 AlertManager 告警\n- 失败信息进入 failure_cases，可以作为 Prompt 进化的反馈信号\n\n**面试延伸**：这和 LangChain 的 OutputParser 思路类似——先尝试解析，失败时 fallback，最终记录错误。区别是 EvoAgent 把降级策略做在了 Coordinator 层。"
+            },
+            {
+              "type": "question",
+              "category": "Structured Output",
+              "question": "Finding 要求模型同时返回 rule_id、severity、fix、test，为什么不让模型自由发挥？",
+              "answer": "自由发挥有几个问题：\n\n**1. 下游无法处理**：Coordinator 需要按 (path, line, rule_id) 去重，如果模型不返回这些字段，去重逻辑无法工作。\n\n**2. 质量无法约束**：没有 fix 和 test 字段的 Finding 对开发者没有行动价值。「这里有问题」但没有修复建议，开发者需要自己研究怎么改。\n\n**3. 评测无法量化**：端到端评测需要比较模型输出的 severity 和期望的 min_severity，需要检查 fix 和 test 是否非空。自由格式的文本无法自动化评测。\n\n**Structured Output 的好处**：\n- Coordinator 可以过滤 fix 或 test 为空的 Finding（硬约束）\n- 可以按 severity 排序，优先展示高风险问题\n- 可以按 rule_id 统计，知道哪些规则最有效\n- 可以计算严重等级准确率（模型判断的 severity 和真值是否一致）\n\n**面试延伸**：这对应了 OpenAI 的 Structured Output 和 LangChain 的 Pydantic OutputParser。核心思想是用 schema 约束模型输出，而不是事后解析自由文本。"
+            },
+            {
+              "type": "question",
+              "category": "幻觉检测",
+              "question": "你的系统怎样处理 LLM 幻觉——模型报告了一个 diff 中根本不存在的问题？",
+              "answer": "EvoAgent 做了三层幻觉检测：\n\n**第一层：行号校验（OpenAICompatibleReviewer）**\n- 系统建立所有新增行的集合（path + line 组合）\n- 模型返回的 (path, line) 不在这个集合中时，Finding 直接丢弃\n- 这防止了模型报告旧代码或上下文行中的「问题」\n\n**第二层：Critic 证据检查**\n- Critic 检查 Finding 引用的 evidence 是否能在 diff 中找到\n- 如果 evidence 是模型编造的（diff 中不存在这段代码），Finding 被标记为可疑\n\n**第三层：EvidenceAgent 独立复核**\n- EvidenceAgent 重新读取新增行，确认问题可以独立复现\n- 它不依赖 Specialist 的输出，而是自己去 diff 中找证据\n- 如果无法复现，Finding 被降级或丢弃\n\n**面试延伸**：这是 RAG 系统中常见的幻觉检测思路——先用检索验证引用的来源是否存在，再用独立验证确认结论是否成立。EvoAgent 把这个模式应用在了代码审查场景。"
+            },
+            {
+              "type": "question",
+              "category": "Diff 边界",
+              "question": "如果模型把旧代码的问题当成新增行引入的问题来报告，你怎么防？",
+              "answer": "这是 PR 审查的一个核心挑战——**区分「本次引入的问题」和「仓库原本就有的问题」**。\n\n**EvoAgent 的策略**：\n1. **DiffParser 精确提取新增行**：解析器从 hunk 头读取新文件起始行号，只把以 `+` 开头的行标记为新增。上下文行和删除行不计入。\n2. **Reviewer 只接收新增行**：LocalRuleReviewer 和 LLM Reviewer 都只在新增行上匹配规则。\n3. **Coordinator 做最终门禁**：即使 Reviewer 漏过了，Coordinator 也会检查 Finding 的 (path, line) 是否在新增行集合中。\n\n**代价**：\n- 删除权限检查可能漏报（删除了安全校验代码）\n- 跨行问题难以检测（问题在新增行，但原因在旧代码）\n- 上下文组合问题（新增行本身没问题，但和旧代码组合后有问题）\n\n**面试延伸**：这是一个典型的 Precision vs Recall 权衡。只检查新增行提高了 Precision（减少误报），但牺牲了 Recall（可能漏报跨行问题）。EvoAgent 选择了高 Precision，因为误报会严重损害用户信任。"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "title": "三、Tool Use 与 Skill 系统",
+      "sections": [
+        {
+          "title": "Tool Use 与 Skill 系统",
+          "anchor": "tool-skill",
+          "groupTitle": "面试核心问答",
+          "difficulty": "advanced",
+          "estimatedMinutes": 15,
+          "blocks": [
+            {
+              "type": "question",
+              "category": "Tool Use",
+              "question": "你的 Tool Use 和 Function Calling 有什么区别？项目里哪些地方用到了类似机制？",
+              "answer": "**概念区别**：\n- **Function Calling**：模型在输出中声明要调用的函数名和参数，由外部系统执行并把结果返回给模型。这是 OpenAI 的原生能力。\n- **Tool Use**：更广义的概念，包括 Function Calling，也包括 Agent 主动选择工具（ReAct 模式中的 Action）。\n\n**EvoAgent 的 ToolRegistry**：\n- 注册阶段：每个 Tool 声明 name、description、parameters（JSON Schema）\n- 调用阶段：AgentLoop 解析模型的 tool_call，查找 ToolRegistry，校验参数，执行工具，返回结果\n- 参数校验：使用 JSON Schema 验证参数类型和必填项，防止模型传入非法参数\n\n**和 LangChain Tool 的对比**：\n- LangChain 的 Tool 也是 name + description + func 的注册模式\n- 区别是 EvoAgent 自建了参数校验和错误处理，没有依赖 LangChain\n\n**面试延伸**：如果面试官问「为什么不用 LangChain 的 Tool」，回答是：项目选择了自建以减少依赖，核心逻辑（注册、校验、调用）只有几十行代码，不值得引入一个重框架。"
+            },
+            {
+              "type": "question",
+              "category": "沙箱隔离",
+              "question": "动态 Skill 加载为什么不走 import 而要走 manifest + 独立容器？",
+              "answer": "直接 import 第三方 Python 代码有几个致命问题：\n\n**1. 代码执行安全**：import 会执行模块顶层代码，恶意 Skill 可以在 import 时执行任意操作（读文件、发网络请求、安装后门）。\n\n**2. 资源隔离**：import 的代码和主服务共享进程空间，可以访问主服务的内存、文件描述符和密钥。\n\n**3. 故障隔离**：import 的代码如果死循环或内存泄漏，会拖垮主服务。\n\n**EvoAgent 的方案**：\n- **manifest 声明**：Skill 通过 JSON manifest 声明能力，主服务只读取 manifest 做注册，不 import 代码\n- **独立容器**：Skill 在独立容器启动，通过受限 RPC 接收 ParsedDiff\n- **资源限制**：容器默认无网络、只读文件系统、有限 CPU 和内存，不挂载服务密钥\n- **输出门禁**：Skill 的输出必须过 JSON schema 校验和位置门禁\n\n**面试延伸**：这和 Kubernetes 的 Pod 隔离思路一致——每个工作负载在独立的沙箱中运行，通过 API 通信，不共享资源。"
+            },
+            {
+              "type": "question",
+              "category": "位置门禁",
+              "question": "如果一个第三方 Skill 审查结果返回了超出新增行范围的 Finding，你的系统怎么处理？",
+              "answer": "Coordinator 在合并所有 Reviewer 结果时做**位置门禁**：\n\n1. 系统维护一个新增行集合：所有 (path, line) 组合，来自 DiffParser 的解析结果\n2. 每个 Finding 的 (path, line) 必须在这个集合中\n3. 不在集合中的 Finding 直接丢弃，不进入最终报告\n\n**为什么需要这个门禁？**\n- Skill 开发者可能犯错，让 Skill 在上下文行或旧代码上匹配了规则\n- 恶意 Skill 可能故意报告旧代码的问题来制造噪声\n- LLM Reviewer 可能幻觉出错误的行号\n\n**门禁的粒度**：精确到行号。如果 Skill 报告了 path=app.py, line=50 的问题，但新增行集合中 app.py 的新增行是 48-49 和 51-52，这个 Finding 会被丢弃。\n\n**面试延伸**：这是 Agent 系统中常见的「输出验证」模式。Agent 的输出不能直接信任，必须经过独立的验证层才能进入下游。"
+            },
+            {
+              "type": "question",
+              "category": "安全模型",
+              "question": "声明式 Skill（evolved-*）和动态 Skill 的安全模型有什么不同？",
+              "answer": "两者是完全不同的安全级别：\n\n**动态 Skill（Python 代码）**：\n- 是完整的 Python 程序，可以调用任何 Python 库\n- 需要在独立容器沙箱中运行\n- 可以调用 LLM API（如果配置了密钥）\n- 灵活性高，但风险也高\n\n**声明式 Skill（evolved-*）**：\n- 不是代码，是结构化的 JSON artifact\n- 只支持字面字符串匹配（match 字段），不支持正则\n- 由 DeclarativeSkillReviewer 执行，只做受限的文本匹配\n- 不加载 Python、不执行 eval、不调用 subprocess、不获取主机权限\n- artifact 的 permissions 固定为空数组\n\n**验证约束（validate_artifact）**：\n- 名称必须以 evolved- 开头\n- 规则 ID 必须符合大写字母、数字、下划线和连字符\n- match 必须是单行、非空、长度受限的字面匹配字符串\n- severity、路径过滤、标题、解释、修复和测试字段都会被校验\n\n**面试延伸**：这是一个经典的「表达能力 vs 安全性」权衡。声明式 Skill 牺牲了灵活性，换来了可以安全地让反馈自动产生新规则。"
+            },
+            {
+              "type": "question",
+              "category": "版本管理",
+              "question": "Skill 版本激活和回滚是怎样做的？两个租户会不会互相影响？",
+              "answer": "**版本激活**：\n1. 调用 POST /v1/skills/{name}/versions/{version}/activate\n2. Store 取消同一个 Skill 的旧活动版本（设置 active=false）\n3. 激活指定版本（设置 active=true）\n4. Service 重载后，新建的 LLM Reviewer 使用这个版本的 Prompt\n\n**版本回滚**：\n- 激活一个旧版本即可。Store 会自动取消当前的活动版本。\n- 所有历史版本都保留在 skill_artifact_versions 表中，包含 SHA-256 指纹和分数\n\n**租户隔离**：\n- Skill artifact 按租户隔离存储\n- 某个租户激活的版本不会成为另一个租户的版本\n- SkillEvolutionEngine.propose() 只读取当前租户的 active artifact\n- 反馈驱动的 auto_propose 也只处理当前租户的反馈\n\n**PostgreSQL 并发安全**：\n- 同一个 Skill 并发创建版本时，可能先读到相同的最大版本号\n- 使用事务级 advisory lock（以 skill_name 做锁键）让版本分配串行化\n\n**面试延伸**：这和 Feature Flag 系统的版本管理类似——每个租户可以独立控制自己使用的版本，互不干扰。"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "title": "四、状态管理与可靠性",
+      "sections": [
+        {
+          "title": "状态管理与可靠性",
+          "anchor": "state-reliability",
+          "groupTitle": "面试核心问答",
+          "difficulty": "advanced",
+          "estimatedMinutes": 15,
+          "blocks": [
+            {
+              "type": "question",
+              "category": "Checkpoint",
+              "question": "checkpoint 以什么为主键？为什么跨任务不复用 checkpoint？",
+              "answer": "**主键**：(task_id, node)\n- task_id 是每次审查任务的 UUID\n- node 是状态机中的节点名（planning/executing/reviewing）\n\n**为什么跨任务不复用？**\n1. **输入不同**：每次 API 调用或 Webhook delivery 的 diff 不同，PR 可能已经更新\n2. **模型可能更新**：LLM Provider 可能已经更新了模型版本\n3. **规则可能变化**：Skill 版本可能已经激活了新版本\n4. **避免污染**：如果复用旧 checkpoint，可能把过期的审查结果当作当前结果\n\n**checkpoint 内容**：\n- 当前步骤号（step）\n- 节点执行的中间结果\n- 时间戳\n- 错误信息（如果有）\n\n**面试延伸**：这和分布式系统中的 exactly-once 语义类似——每个任务独立执行，不依赖前一个任务的状态。宁可重复计算，也不使用过期的缓存结果。"
+            },
+            {
+              "type": "question",
+              "category": "超时",
+              "question": "Harness 的超时是硬超时吗？如果一个 LLM 请求卡在 30 秒没返回，系统怎么处理？",
+              "answer": "**不是硬超时**。\n\nEvoAgent 的超时是**软超时**：\n- 只在状态迁移时检查累计时间\n- 如果 EXECUTING 阶段已经超过 timeout，下一次状态迁移时会变成 FAILED\n- 但正在执行的 LLM 请求不会被中途杀掉\n\n**为什么不做硬超时？**\n- Python 的 threading 没有提供强制终止线程的安全方式\n- 强制杀线程可能导致资源泄漏（文件未关闭、连接未释放）\n- LLM 请求有 urllib 的 timeout 参数（通常 30-60 秒），会自行返回\n\n**实际行为**：\n- LLM 请求最多卡 urllib timeout 的时间（比如 60 秒）\n- 请求返回后，Harness 检查累计时间，发现已超时，转为 FAILED\n- 所以实际超时 = Harness timeout + urllib timeout\n\n**面试延伸**：这是 Python 多线程的一个固有限制。如果面试官问「怎么改进」，可以回答：用 subprocess 隔离 LLM 调用，或者迁移到 asyncio（可以用 asyncio.wait_for 做真正的硬超时）。"
+            },
+            {
+              "type": "question",
+              "category": "幂等",
+              "question": "Webhook 幂等是怎么做的？如果 GitHub 对同一个 delivery 发了两次请求会怎样？",
+              "answer": "EvoAgent 用 **delivery ID** 做幂等控制：\n\n**第一次请求**：\n1. API 层从 X-GitHub-Delivery 头读取 delivery ID\n2. 调用 claim_webhook(delivery_id) 尝试认领\n3. 认领成功（数据库插入成功），创建 deferred task\n4. 投递异步队列\n\n**第二次请求（相同 delivery ID）**：\n1. claim_webhook(delivery_id) 发现已存在，认领失败\n2. API 层直接返回 200 OK（表示已处理），不创建新任务\n\n**为什么需要幂等？**\n- GitHub 会在超时或网络错误时重试 delivery\n- 同一个 PR 的 synchronize 事件可能触发多次\n- 不幂等会导致同一个 PR 被重复审查，浪费资源\n\n**异步评论的幂等**：\n- 异步任务成功后发布 GitHub 评论时，使用带任务标记的评论进行 upsert\n- 同一任务的多次评论会更新同一条评论，而不是创建多条\n\n**面试延伸**：这是分布式系统中的经典幂等模式——用唯一标识（delivery ID）做去重，而不是依赖请求内容的哈希。"
+            },
+            {
+              "type": "question",
+              "category": "消息可靠性",
+              "question": "Worker 从 Redis Streams 取到任务后崩溃了，这条消息会丢失吗？",
+              "answer": "**取决于实现方式**。\n\n**如果用 BRPOP（Redis List）**：\n- 消息取出后立即从 list 消失\n- Worker 崩溃后，消息永久丢失\n- 这是早期实现的风险\n\n**EvoAgent 当前使用 Redis Streams**：\n- Worker 通过 Consumer Group 读取消息（XREADGROUP）\n- 消息取出后进入 Pending 状态，不自动删除\n- Worker 完成任务后显式发送 XACK 确认\n- 如果 Worker 崩溃，消息留在 Pending 中\n- 其他 Worker 可以通过 XAUTOCLAIM 或 XPENDING + XCLAIM 重新认领\n\n**Consumer 标识**：\n- 每个 Worker 有唯一的 consumer ID（hostname + uuid 后缀）\n- 这允许多个 Worker 并行消费，互不干扰\n\n**死信队列**：\n- 如果一条消息被重试超过阈值，会被移入死信队列\n- 死信队列中的任务可以人工检查或重新投递\n\n**面试延伸**：这是消息队列的经典 at-least-once 语义。BRPOP 是 at-most-once（取出即消失），Streams 是 at-least-once（需要显式 ACK）。"
+            },
+            {
+              "type": "question",
+              "category": "并发",
+              "question": "PostgreSQL 用 advisory lock 解决什么问题？不加锁会怎样？",
+              "answer": "**问题场景**：同一个 Skill 的两个版本同时创建。\n\n**不加锁的竞态**：\n1. Worker A 读取当前最大版本号 = 5\n2. Worker B 读取当前最大版本号 = 5\n3. Worker A 创建版本 6\n4. Worker B 创建版本 6\n5. 两个版本 6 冲突，或者一个覆盖了另一个\n\n**advisory lock 的解决方式**：\n- 使用 skill_name 作为锁键\n- 事务级 advisory lock（pg_advisory_xact_lock）\n- Worker A 获取锁，读取版本号 5，创建版本 6，提交事务，释放锁\n- Worker B 等待锁，获取锁后读取版本号 6，创建版本 7\n\n**为什么不用 SELECT FOR UPDATE？**\n- Skill 版本表可能还没有这个 skill_name 的行\n- advisory lock 不依赖行锁，可以在事务级别锁定任意键\n\n**面试延伸**：这是分布式锁的一种实现。advisory lock 是 PostgreSQL 特有的轻量级锁，适合这种「序列化编号分配」的场景。如果是 MySQL，可以用 GET_LOCK() 或基于唯一索引的乐观锁。"
+            },
+            {
+              "type": "question",
+              "category": "API 设计",
+              "question": "同步 API 和异步 API 共存的设计，什么场景下该用哪种？",
+              "answer": "**同步 API**：\n- 调用方发送请求后阻塞等待，直到审查完成\n- 适合：小 diff、调试、CI 流水线中的快速检查\n- 优点：简单直接，一次调用拿到完整结果\n- 缺点：长 diff 可能超时（HTTP 连接超时）\n\n**异步 API**：\n- 调用方发送请求后立即拿到 task_id，通过轮询或 Webhook 获取结果\n- 适合：大 diff、Webhook 触发、外部模型（延迟不可控）\n- 优点：不阻塞调用方，可以处理长时间运行的任务\n- 缺点：需要额外的状态查询接口\n\n**EvoAgent 的实现**：\n- 同一个 POST /v1/review 接口，根据参数决定同步/异步\n- 同步模式：在当前线程执行 ReviewHarness，完成后返回\n- 异步模式：创建 deferred task，投递到 TaskQueue，立即返回 task_id\n- Webhook 触发时默认异步（因为 diff 可能很大，且需要处理 GitHub 超时）\n\n**面试延伸**：这和 Celery 的设计类似——.delay() 返回 AsyncResult（异步），.apply() 同步执行。区别是 EvoAgent 把两种模式统一在同一个 API 中。"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "title": "五、评测与自进化",
+      "sections": [
+        {
+          "title": "评测与自进化",
+          "anchor": "evaluation-evolution",
+          "groupTitle": "面试核心问答",
+          "difficulty": "advanced",
+          "estimatedMinutes": 15,
+          "blocks": [
+            {
+              "type": "question",
+              "category": "评测指标",
+              "question": "你怎么评价一个代码审查 Agent 好不好？用什么指标？",
+              "answer": "**核心指标**：\n- **Precision**：报告的 Finding 中有多少是真问题？高 Precision = 少误报\n- **Recall**：真实问题中有多少被发现了？高 Recall = 少漏报\n- **F1**：Precision 和 Recall 的调和平均，平衡两者\n- **High-risk Recall**：高风险问题（安全漏洞、数据泄漏）的召回率。这比整体 Recall 更重要——漏掉一个 eval() 比漏掉一个代码风格问题严重得多\n\n**辅助指标**：\n- **Severity Accuracy**：模型判断的严重等级和真值是否一致\n- **Clean PR Accuracy**：在没有任何问题的干净 PR 上，模型是否正确返回空结果\n- **Safe Fix Rate**：自动修复建议中有多少是安全的（不引入新问题）\n- **Execution Success Rate**：评测执行成功率，异常会降低这个指标\n\n**综合得分计算**：\n```\n有风险样本时：F1 × 0.65 + Severity Accuracy × 0.15\n有干净样本时：Clean Accuracy × 0.20\n最终 score = 加权平均 × Execution Success Rate\n```\n\n**为什么 Execution Success Rate 是乘数？** 如果服务不可用（异常），不能通过「少报问题」来掩盖。异常会降低成功率，直接拉低总分。\n\n**面试延伸**：Precision/Recall/F1 是分类任务的标准指标。代码审查可以看作一个二分类问题：每一行新增代码是否有问题。"
+            },
+            {
+              "type": "question",
+              "category": "过拟合防护",
+              "question": "为什么需要 Validation 和 Holdout 两套数据？只用一套够不够？",
+              "answer": "**只用一套的风险**：如果候选 Prompt 知道了全部 validation 案例，它可以针对这些特定样本写规则。比如在 validation 中有 3 个 eval() 的案例，候选可以硬编码「看到 eval 就报 SEC-EVAL」，在 validation 上分数很高，但对新的 eval() 变体（如 eval(input())）可能无效。\n\n**两套数据的作用**：\n- **Validation**：用于开发候选 Prompt。系统在这个数据集上回放，计算分数\n- **Holdout**：用于验证泛化能力。候选不知道 Holdout 的具体案例，系统在这个数据集上检查受保护指标是否退化\n\n**Holdout 的保密性**：\n- Holdout 的逐样本 case_results 和错误明细会被脱敏\n- 只持久化聚合指标和错误数量\n- 这样可以减少把隐藏集样本细节暴露给候选生成逻辑的机会\n\n**门禁逻辑**：\n- 候选在 Validation 上必须达到最小提升（默认 0.01）\n- 候选在 Holdout 上受保护指标不能退化\n- 两个条件都满足才能激活\n\n**面试延伸**：这和机器学习中的 train/validation/test 划分完全一致。Validation 用于调参（Prompt 进化），Holdout（test set）用于最终评估。"
+            },
+            {
+              "type": "question",
+              "category": "门禁安全",
+              "question": "Prompt 进化时，候选的 score 是调用方传的还是系统自己算的？为什么？",
+              "answer": "**系统自己算的，调用方传的值被显式忽略。**\n\n**流程**：\n1. 调用方通过 POST /v1/evolution/propose 提交候选 Prompt，可以附带一个可选的 regression_score\n2. EvolutionEngine.propose() 接收到候选后，**不信任**调用方的分数\n3. 系统在 Validation 和 Holdout 上分别回放 baseline 和 candidate\n4. 用自己回放的结果做门禁判断\n5. 调用方传的 regression_score 被记录为 external_regression_score_ignored\n\n**为什么不信任调用方？**\n- 调用方可能有 bug，计算了错误的分数\n- 恶意调用方可能传入高分让不合格的版本上线\n- 系统需要用自己的评测器和数据集做独立验证\n\n**面试延伸**：这是安全设计中的「不信任外部输入」原则。所有来自 API 的数据都应该被验证，而不是直接使用。这和 Webhook 签名验证的思路一致。"
+            },
+            {
+              "type": "question",
+              "category": "门禁逻辑",
+              "question": "如果新的 Prompt 在 Validation 上 F1 提升了，但在 Holdout 上退化了，会怎样？",
+              "answer": "**会被拒绝激活。**\n\n**门禁判断**：\n1. Validation F1 提升 ≥ 0.01 → ✅ 通过\n2. Holdout 受保护指标不退化 → ❌ 失败\n3. 最终决策：rejected\n\n**为什么这样设计？**\n- Validation 提升可能只是对特定样本过拟合\n- Holdout 退化说明泛化能力下降了\n- 宁可不上线一个「看起来更好」的版本，也不愿意引入回归\n\n**受保护指标包括**：\n- score（综合得分）\n- Precision\n- Recall\n- 高严重等级召回率\n- 执行成功率\n- 严重等级准确率（有对应样本时）\n- 干净样本准确率（有对应样本时）\n\n**EVOAGENT_EVAL_MAX_METRIC_REGRESSION** 控制允许退化多少，默认是 0（完全不允许退化）。\n\n**面试延伸**：这是 A/B 测试中的常见策略——新方案必须在所有关键指标上都不退化，才能上线。一个指标的提升不能以其他指标的下降为代价。"
+            },
+            {
+              "type": "question",
+              "category": "证据边界",
+              "question": "受控基准数据集和真实 GitHub PR 数据有什么不同？为什么门禁会因此阻止生产激活？",
+              "answer": "**两种数据来源**：\n- **synthetic-controlled**：人工构造的 diff，带有精确的 expected_findings 标注\n- **public-github-pr**：真实 GitHub PR 的 diff，需要人工审核后补充标注\n\n**受控数据的优势**：\n- 标注精确，没有歧义\n- 可以覆盖特定规则（每个规则至少有正样本和干净样本）\n- 可以快速迭代，不需要等待真实 PR 积累\n\n**受控数据的局限**：\n- 人工构造的 diff 可能不反映真实 PR 的复杂性\n- 标注者可能无意中引入了和模型相同的偏见\n- 无法证明在真实环境中的效果\n\n**门禁设计**：\n- production_data_provenance 门禁要求数据来源集合严格等于 public-github-pr\n- 当前只有 synthetic-controlled 数据\n- 因此 production_activation_allowed = false\n\n**面试延伸**：这是评测系统中的「证据分级」思想。受控实验可以验证机制是否正确工作，但不能证明生产效果。真实数据才能证明生产效果，但获取成本更高。"
+            },
+            {
+              "type": "question",
+              "category": "自进化",
+              "question": "Feedback → Prompt 候选 → 回放 → 激活 这条链路，和传统 CI/CD 有什么相似之处？",
+              "answer": "这条链路本质上是一个**自动化的质量门禁流水线**，和 CI/CD 高度相似：\n\n| 环节 | EvoAgent | CI/CD |\n|------|----------|-------|\n| 触发源 | 用户反馈（误报/漏报） | 代码提交（git push） |\n| 构建 | 从反馈生成 Prompt 候选 | 编译代码（build） |\n| 测试 | 在 Validation + Holdout 上回放 | 运行单元测试 + 集成测试 |\n| 门禁 | F1 提升 + 受保护指标不退化 | 测试全通过 + 覆盖率不降 |\n| 部署 | 激活候选 Prompt | 部署到生产环境 |\n| 回滚 | 激活旧版本 Prompt | 回滚到上一个部署版本 |\n| 审计 | evolution_runs 表记录每次运行 | CI/CD 日志 |\n\n**关键区别**：\n- CI/CD 的测试是确定性的（代码对或错），Prompt 评测是概率性的（模型输出有随机性）\n- CI/CD 可以自动回滚（健康检查失败），Prompt 回滚需要人工触发\n- CI/CD 的反馈是自动的（测试失败），Prompt 的反馈来自人工标注\n\n**面试延伸**：如果面试官问「怎么改进这条链路」，可以回答：引入影子运行（新 Prompt 在生产流量上运行但不影响结果）和灰度发布（先用 10% 流量验证新 Prompt）。"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "title": "六、安全与工程实践",
+      "sections": [
+        {
+          "title": "安全与工程实践",
+          "anchor": "security-engineering",
+          "groupTitle": "面试核心问答",
+          "difficulty": "advanced",
+          "estimatedMinutes": 12,
+          "blocks": [
+            {
+              "type": "question",
+              "category": "Webhook 安全",
+              "question": "Webhook 签名验证用 HMAC-SHA256，为什么不直接用 HTTPS 就够了？",
+              "answer": "HTTPS 和 HMAC 解决的是两个不同层面的安全问题：\n\n**HTTPS 保护的是传输层**：\n- 防止中间人窃听或篡改请求内容\n- 但不能验证请求发送者的身份——任何能发 HTTPS 请求的人都可以调用你的 API\n\n**HMAC 保护的是应用层**：\n- 用共享 Secret 和请求 body 计算签名\n- 只有知道 Secret 的发送者（GitHub）才能生成有效签名\n- 防止伪造请求（有人假装是 GitHub 发 Webhook）\n\n**EvoAgent 的实现**：\n1. 从 X-Hub-Signature-256 头读取 GitHub 计算的签名\n2. 用本地配置的 Secret 和原始 body 计算 HMAC-SHA256\n3. 用 hmac.compare_digest（常量时间比较）对比两个签名\n4. 如果 Secret 未配置，接口返回 503，不会无验证接收事件\n\n**为什么用常量时间比较？** 普通的 == 比较会在第一个不匹配的字符处提前返回，攻击者可以通过测量响应时间逐字节猜测签名（时序攻击）。hmac.compare_digest 确保比较时间恒定。\n\n**面试延伸**：这是 API 安全的最佳实践——传输层用 TLS，应用层用签名。Stripe、GitHub、Slack 的 Webhook 都使用这种双层防护。"
+            },
+            {
+              "type": "question",
+              "category": "自动修复",
+              "question": "自动修复为什么不直接用 LLM 生成 patch？你做了哪些限制？",
+              "answer": "**LLM 生成 patch 的风险**：\n1. **语法错误**：LLM 可能生成不合法的 Python 代码\n2. **语义错误**：修复可能引入新的 bug（比如把 eval() 替换成 ast.literal_eval() 但参数不兼容）\n3. **上下文不足**：LLM 只看到 diff 的片段，不知道完整的文件内容\n4. **不可验证**：没有测试环境来验证修复是否正确\n\n**EvoAgent 的限制**：\n- 只做三类白名单文本修复（比如移除调试输出、替换危险函数调用的简单模式）\n- 不生成任意代码，不做复杂的代码改写\n- 修复后创建 evoagent/fix-pr-* 新分支，不直接改用户分支\n- 不自动创建 PR，只返回分支和提交信息\n\n**已知风险**：\n- 修复前不检查 PR 是否已更新（没有保存审查时的 head SHA）\n- 如果 PR 在审查后被更新，修复可能应用到过期的代码上\n- 这是当前的一个并发安全问题\n\n**面试延伸**：这体现了「保守修复」的工程原则——覆盖面小但行为可预测，优于覆盖面大但行为不可控。Copilot 和 Cursor 的自动修复也采用了类似的保守策略。"
+            },
+            {
+              "type": "question",
+              "category": "并发风险",
+              "question": "修复前不检查 PR 是否已更新，这会引入什么问题？怎么解决？",
+              "answer": "**问题场景**：\n1. 10:00 - 系统审查 PR（head SHA = abc123），发现问题 X\n2. 10:05 - 开发者推送新提交（head SHA = def456），修复了问题 X 但引入了问题 Y\n3. 10:10 - 系统基于旧审查结果生成修复，应用到 def456 上\n4. 修复可能和开发者的新代码冲突，或者重复修复已经修复的问题\n\n**根本原因**：任务没有保存审查时的 head SHA，无法判断报告是否已经过期。\n\n**解决方案**：\n1. 任务创建时保存 PR 的 head SHA\n2. 生成修复前，重新获取 PR 的当前 head SHA\n3. 如果两者不同，标记报告为过期，不生成修复\n4. 或者：在新 head SHA 上重新运行审查，基于新结果生成修复\n\n**面试延伸**：这是分布式系统中的经典问题——读取时的一致性和写入时的一致性。解决方式是在写入前做二次确认（类似乐观锁的 version check）。"
+            },
+            {
+              "type": "question",
+              "category": "故障隔离",
+              "question": "你的系统怎样防止一个 Reviewer 的崩溃拖垮整个审查任务？",
+              "answer": "EvoAgent 做了多层故障隔离：\n\n**1. Reviewer 级别的 try/except**：\n- Coordinator 调用每个 Reviewer 时包裹在 try/except 中\n- 单个 Reviewer 抛异常不会中断其他 Reviewer 的执行\n- 失败的 Reviewer 被记录到 trace，但不影响其他 Reviewer 的结果\n\n**2. 降级策略**：\n- 如果至少有一个 Reviewer 返回了有效结果，任务降级成功\n- 只有所有 Reviewer 都失败时，任务才变成 FAILED\n- 降级成功的任务会在报告中标注哪些 Reviewer 失败了\n\n**3. 超时隔离**：\n- 每个 Reviewer 的 LLM 调用有独立的 urllib timeout\n- 一个 Reviewer 的超时不会阻塞其他 Reviewer\n\n**4. 记录与告警**：\n- 失败的 Reviewer 信息进入 failure_cases\n- AlertManager 监控失败率，超过阈值时告警\n- Metrics 统计每个 Reviewer 的成功率\n\n**面试延伸**：这是微服务中的 Circuit Breaker 模式的简化版。如果一个 Reviewer 持续失败，可以暂时跳过它，而不是每次都等待它超时。"
+            },
+            {
+              "type": "question",
+              "category": "水平扩展",
+              "question": "如果要把这套系统从单机部署改成多 Worker 水平扩展，哪些模块需要改？",
+              "answer": "**需要改的**：\n\n**1. 任务队列**：\n- 单机内存队列 → Redis Streams（已支持）\n- 多个 Worker 通过 Consumer Group 并行消费\n- 需要处理消息的 ACK 和重试\n\n**2. 状态存储**：\n- SQLite → PostgreSQL（已支持）\n- 多个 Worker 共享同一个数据库\n- 需要处理并发写入（advisory lock 已实现）\n\n**3. 上下文管理**：\n- threading.local() 的请求隔离在单进程内有效\n- 多进程部署时，每个进程有独立的 thread-local 空间，不冲突\n\n**不需要改的**：\n- ReviewHarness：无状态，每次执行独立\n- AgentRuntime：无状态，只依赖输入参数\n- Reviewer 实现：无状态，纯函数式调用\n- DiffParser：无状态，输入 diff 输出 ParsedDiff\n\n**架构变化**：\n```\n单 Worker: API → Service → Harness → Reviewer\n多 Worker: API → Redis Streams → Worker 1/2/3 → Service → Harness → Reviewer\n```\n\n**面试延伸**：EvoAgent 的分层架构天然支持水平扩展——无状态的业务逻辑层可以任意扩展，有状态的持久化层通过 PostgreSQL 共享。这是 12-Factor App 的核心原则。"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "title": "真实面经",
+      "sections": [
+        {
+          "title": "百度 Agent 开发一面",
           "anchor": "baidu-interview",
-          "groupTitle": "真实面经：百度 Agent 开发一面",
+          "groupTitle": "真实面经",
           "difficulty": "advanced",
           "estimatedMinutes": 20,
           "blocks": [
@@ -258,13 +325,13 @@
               "type": "question",
               "category": "混合架构",
               "question": "本地规则、LLM 和动态 Skill 怎么分工？",
-              "answer": "本地规则适合检查证据明确的问题，比如 eval、shell=True、硬编码密钥和调试输出。它速度快，也能在没有模型配置时运行。\n\nLLM Reviewer 更适合处理需要语义和上下文的问题。动态 Skill 则提供扩展接口，允许系统从 manifest 加载额外 Reviewer。\n\n当前结果由 Synthesizer 合并。它按路径、行号和规则 ID 去重，并结合 Critic 和 Test 的结果过滤。但这套裁决仍偏规则化，还不能解决两个 Reviewer 对业务语义产生根本分歧的情况。"
+              "answer": "本地规则适合检查证据明确的问题，比如 eval、shell=True、硬编码密钥和调试输出。它速度快，也能在没有模型配置时运行。\n\nLLM Reviewer 更适合处理需要语义和上下文的问题。动态 Skill 则提供扩展接口，允许系统从 manifest 加载额外 Reviewer。\n\n当前结果由 Synthesizer 合并。它按路径、行号和规则 ID 去重，并结合 Critic 和 Test 的结果过滤。"
             },
             {
               "type": "question",
               "category": "数据流",
               "question": "一次完整审查经过哪些模块？",
-              "answer": "GitHub webhook 先进入 API 层，系统校验 HMAC-SHA256 签名，再根据 installation 找到租户。claim_webhook 用 delivery ID 做第一次幂等控制。\n\n服务创建任务后，把消息写入内存队列或 Redis Streams。Worker 取到任务，下载并校验 diff，然后交给 ReviewHarness。Harness 依次执行 planning、executing 和 reviewing 三个节点。executing 节点调用 MultiAgentCoordinator，经过 Planner、Specialist、Critic、Test、Synthesizer、Fix 和 Verifier，得到最终 findings。\n\nHarness 保存 checkpoint、状态轨迹和报告。异步任务成功后，系统使用带任务标记的评论进行 upsert，避免同一任务反复创建 GitHub 评论。"
+              "answer": "GitHub webhook 先进入 API 层，系统校验 HMAC-SHA256 签名，再根据 installation 找到租户。\n\n服务创建任务后，把消息写入内存队列或 Redis Streams。Worker 取到任务，下载并校验 diff，然后交给 ReviewHarness。Harness 依次执行 planning、executing 和 reviewing 三个节点。executing 节点调用 MultiAgentCoordinator，经过 Planner、Specialist、Critic、Test、Synthesizer、Fix 和 Verifier，得到最终 findings。\n\nHarness 保存 checkpoint、状态轨迹和报告。异步任务成功后，系统使用带任务标记的评论进行 upsert，避免同一任务反复创建 GitHub 评论。"
             },
             {
               "type": "question",
@@ -297,16 +364,11 @@
               "answer": "PR 阶段需要快，先看 diff 能控制成本和噪声。全仓扫描适合定期安全任务。\n\n如果需要理解调用关系，可以对默认分支建立代码索引，审查时按 diff 中的符号检索少量上下文，而不是每次把整个仓库发给模型。"
             }
           ]
-        }
-      ]
-    },
-    {
-      "title": "真实面经：字节 Agent 开发二面",
-      "sections": [
+        },
         {
-          "title": "字节二面真题",
+          "title": "字节 Agent 开发二面",
           "anchor": "bytedance-interview",
-          "groupTitle": "真实面经：字节 Agent 开发二面",
+          "groupTitle": "真实面经",
           "difficulty": "advanced",
           "estimatedMinutes": 15,
           "blocks": [
@@ -324,13 +386,13 @@
               "type": "question",
               "category": "进化",
               "question": "自进化体现在哪里？",
-              "answer": "系统会根据反馈更新可审计、可评测、可回滚的审查策略，而不是自己修改模型权重。自进化不是在线训练模型参数，而是反馈驱动的记忆、提示词和 Skill 版本演进。\n\n第一层是记忆。系统会保存已批准或被拒绝的 Finding、人工反馈和任务摘要。后续处理同一租户、同一仓库的任务时，Agent 可以召回相关经验。Working memory 有 TTL，任务结束后会压缩成 episodic memory。\n\n第二层是提示词进化。误报、漏报、坏修复和执行错误会生成受限的候选提示词修改。候选需要经过安全检查，并和当前版本在相同 validation、holdout 数据上回放。只有达到最小提升且受保护指标不退化时才会激活，失败版本仍会留存用于审计和回滚。\n\n第三层是 Skill 进化。确认的漏报可以生成新的 evolved-* 字面匹配规则，确认的误报可以移除对应规则。生成的是声明式 artifact，不是任意 Python，也不允许正则和主机权限。它同样需要通过 validation 和 holdout 门禁，激活后才进入该租户的 Coordinator。"
+              "answer": "系统会根据反馈更新可审计、可评测、可回滚的审查策略，而不是自己修改模型权重。自进化不是在线训练模型参数，而是反馈驱动的记忆、提示词和 Skill 版本演进。\n\n第一层是记忆。系统会保存已批准或被拒绝的 Finding、人工反馈和任务摘要。后续处理同一租户、同一仓库的任务时，Agent 可以召回相关经验。\n\n第二层是提示词进化。误报、漏报、坏修复和执行错误会生成受限的候选提示词修改。候选需要经过安全检查，并和当前版本在相同 validation、holdout 数据上回放。只有达到最小提升且受保护指标不退化时才会激活。\n\n第三层是 Skill 进化。确认的漏报可以生成新的 evolved-* 字面匹配规则，确认的误报可以移除对应规则。生成的是声明式 artifact，不是任意 Python。"
             },
             {
               "type": "question",
               "category": "架构设计",
               "question": "为什么要采用多 Agent 代码审查，而不是让一个能力更强的模型一次性完成审查？",
-              "answer": "多 Agent 的价值不在于把同一个问题重复问几遍，而在于把不同职责拆开，并给关键结论增加独立门禁。\n\n当前流程中，Security、Reliability 和可选 LLM Specialist 分别检查不同风险域。之后 Critic 检查证据、位置和建议是否完整，EvidenceAgent 重新读取新增行，Verifier 检查可信度和修复建议，Arbiter 再决定哪些 Finding 可以进入报告。\n\n这种结构有几个实际用途：\n- 一个 Specialist 失败时，可以重试或把 assignment 转给替代 Agent，不必让整个任务立即失败\n- 不同 Reviewer 可以并行运行，本地确定性规则和强模型也可以组合使用\n- 高风险结论不会仅凭一次模型输出进入报告\n- 每次 assignment、质疑、修订和裁决都会形成消息记录，比较容易解释一条问题为什么被接受或拒绝\n\n不过，同一个模型扮演多个角色并不等于真正独立，错误仍可能高度相关。"
+              "answer": "多 Agent 的价值不在于把同一个问题重复问几遍，而在于把不同职责拆开，并给关键结论增加独立门禁。\n\n当前流程中，Security、Reliability 和可选 LLM Specialist 分别检查不同风险域。之后 Critic 检查证据、位置和建议是否完整，EvidenceAgent 重新读取新增行，Verifier 检查可信度和修复建议，Arbiter 再决定哪些 Finding 可以进入报告。\n\n这种结构有几个实际用途：\n- 一个 Specialist 失败时，可以重试或把 assignment 转给替代 Agent\n- 不同 Reviewer 可以并行运行，本地规则和强模型组合使用\n- 高风险结论不会仅凭一次模型输出进入报告\n- 每次 assignment、质疑、修订和裁决都会形成消息记录\n\n不过，同一个模型扮演多个角色并不等于真正独立，错误仍可能高度相关。"
             },
             {
               "type": "question",
@@ -345,16 +407,11 @@
               "answer": "Harness 负责一次代码审查的业务外壳，管理任务状态、diff 解析、报告生成、trace、失败收尾和节点级恢复。\n\nAgentRuntime 为通用执行器，处理步骤和时间预算、取消、节点重试、事件以及 checkpoint 恢复。"
             }
           ]
-        }
-      ]
-    },
-    {
-      "title": "真实面经：淘天 AI Agent 开发一面",
-      "sections": [
+        },
         {
-          "title": "淘天一面真题",
+          "title": "淘天 AI Agent 开发一面",
           "anchor": "taotian-interview",
-          "groupTitle": "真实面经：淘天 AI Agent 开发一面",
+          "groupTitle": "真实面经",
           "difficulty": "advanced",
           "estimatedMinutes": 5,
           "blocks": [
