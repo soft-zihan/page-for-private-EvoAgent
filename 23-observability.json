@@ -146,12 +146,32 @@
             {
               "type": "table",
               "table": {
-                "headers": ["配置项", "默认值", "说明"],
+                "headers": [
+                  "配置项",
+                  "默认值",
+                  "说明"
+                ],
                 "rows": [
-                  ["alert_failure_rate", "0.2", "失败率阈值（20%）"],
-                  ["alert_min_samples", "10", "最小样本数"],
-                  ["otel_service_name", "evoagent", "OpenTelemetry 服务名"],
-                  ["otel_endpoint", "（空）", "OTLP 导出端点（空=不导出）"]
+                  [
+                    "alert_failure_rate",
+                    "0.2",
+                    "失败率阈值（20%）"
+                  ],
+                  [
+                    "alert_min_samples",
+                    "10",
+                    "最小样本数"
+                  ],
+                  [
+                    "otel_service_name",
+                    "evoagent",
+                    "OpenTelemetry 服务名"
+                  ],
+                  [
+                    "otel_endpoint",
+                    "（空）",
+                    "OTLP 导出端点（空=不导出）"
+                  ]
                 ]
               }
             }

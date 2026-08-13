@@ -178,12 +178,37 @@
             {
               "type": "table",
               "table": {
-                "headers": ["阶段", "改动", "并发能力", "代码改动量"],
+                "headers": [
+                  "阶段",
+                  "改动",
+                  "并发能力",
+                  "代码改动量"
+                ],
                 "rows": [
-                  ["Phase 0 (当前)", "ThreadingHTTPServer", "~100", "0 行"],
-                  ["Phase 1", "FastAPI + asyncio.to_thread", "~10000", "api.py ~200 行"],
-                  ["Phase 2", "LLM 调用异步化 (httpx)", "~10000 (延迟降低)", "reviewer.py ~50 行"],
-                  ["Phase 3", "全链路异步", "~50000", "~800 行"]
+                  [
+                    "Phase 0 (当前)",
+                    "ThreadingHTTPServer",
+                    "~100",
+                    "0 行"
+                  ],
+                  [
+                    "Phase 1",
+                    "FastAPI + asyncio.to_thread",
+                    "~10000",
+                    "api.py ~200 行"
+                  ],
+                  [
+                    "Phase 2",
+                    "LLM 调用异步化 (httpx)",
+                    "~10000 (延迟降低)",
+                    "reviewer.py ~50 行"
+                  ],
+                  [
+                    "Phase 3",
+                    "全链路异步",
+                    "~50000",
+                    "~800 行"
+                  ]
                 ]
               }
             },
