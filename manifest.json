@@ -22,9 +22,9 @@
     "17-skill-sandbox.json",
     "18-evaluation.json",
     "19-github-setup.json",
-    "20-interview.json",
     "21-tech-stack.json",
-    "22-agent-frameworks.json"
+    "22-agent-frameworks.json",
+    "20-interview.json"
   ],
   "groups": [
     {
@@ -53,9 +53,14 @@
       "files": ["19-github-setup.json"]
     },
     {
-      "title": "参考与面试",
-      "description": "面试 Q&A、技术选型速查、Agent 框架迁移对照",
-      "files": ["20-interview.json", "21-tech-stack.json", "22-agent-frameworks.json"]
+      "title": "参考与选型",
+      "description": "技术选型速查、Agent 框架迁移对照",
+      "files": ["21-tech-stack.json", "22-agent-frameworks.json"]
+    },
+    {
+      "title": "面试准备",
+      "description": "面试 Q&A、真实面经",
+      "files": ["20-interview.json"]
     }
   ]
 }
