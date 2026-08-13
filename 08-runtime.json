@@ -122,8 +122,8 @@
               "type": "diagram",
               "diagram": {
                 "language": "mermaid",
-                "content": "graph LR\n    subgraph 模型决策[\"模型决策\"]\n        M[LLM] -->|action=tool<br/>tool=search_diff<br/>arguments={...}| AC[AgentLoop] \n    end\n    subgraph 工具系统[\"工具系统\"]\n        TR[ToolRegistry]\n        AT1[search_diff]\n        AT2[changed_line]\n        AT3[list_changed_files]\n        AT4[recall_memory]\n    end\n    \n    AC -->|invoke| TR\n    TR -->|校验参数| V[_validate]\n    TR -->|handler| AT1\n    TR -->|handler| AT2\n    TR -->|handler| AT3\n    TR -->|handler| AT4\n    AT1 -->|result| OB[Observation]\n    OB -->|追加到消息历史| M\n    \n    style TR fill:#ffd700,stroke:#b8860b,color:#000",
-                "caption": "Function Calling 流程：模型决策 → ToolRegistry 校验 → 工具执行 → Observation 反馈"
+                "content": "graph TD\n    M[LLM] -->|action: tool| AC[AgentLoop]\n    AC -->|invoke name+args| TR[ToolRegistry]\n    TR --> V[_validate<br/>四层参数校验]\n    V -->|校验通过| H[handler<br/>执行函数]\n    V -->|校验失败| ERR[AgentLoopProtocolError]\n    H --> OB[Observation<br/>ok: true]\n    ERR --> OB2[Observation<br/>ok: false]\n    OB --> M\n    OB2 --> M\n\n    style TR fill:#ffd700,stroke:#b8860b,color:#000\n    style V fill:#ff6b6b,stroke:#cc0000,color:#fff\n    style OB fill:#90ee90,stroke:#228b22,color:#000\n    style OB2 fill:#ffb3b3,stroke:#cc0000,color:#000",
+                "caption": "Function Calling 流程：LLM 决策 → ToolRegistry 校验 → 执行 → Observation 反馈"
               }
             },
             {
