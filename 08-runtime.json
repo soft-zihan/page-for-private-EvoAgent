@@ -108,6 +108,104 @@
           ]
         },
         {
+          "title": "ToolRegistry：Function Calling 的自建实现",
+          "anchor": "tool-registry",
+          "groupTitle": "运行时",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 10,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "**Function Calling 是什么？**\n\nFunction Calling 是 OpenAI 在 2023 年推出的能力：模型在输出中声明「我要调用某个函数，参数是 XXX」，由外部系统执行函数并把结果返回给模型。\n\n**核心概念**：\n- **工具声明**：告诉模型有哪些工具可用（name + description + parameters JSON Schema）\n- **工具选择**：模型在推理过程中决定是否调用工具，调用哪个\n- **工具执行**：外部系统接收模型的 tool_call，执行对应函数，返回结果\n- **结果反馈**：工具执行结果作为 observation 追加到消息历史，供下一轮推理使用\n\n**EvoAgent 的自建实现**：`ToolRegistry` + `AgentTool` 构成了一个轻量级的 Function Calling 系统，不依赖 LangChain 或 OpenAI SDK。"
+            },
+            {
+              "type": "diagram",
+              "diagram": {
+                "language": "mermaid",
+                "content": "graph LR\n    subgraph 模型决策[\"模型决策\"]\n        M[LLM] -->|action=tool<br/>tool=search_diff<br/>arguments={...}| AC[AgentLoop] \n    end\n    subgraph 工具系统[\"工具系统\"]\n        TR[ToolRegistry]\n        AT1[search_diff]\n        AT2[changed_line]\n        AT3[list_changed_files]\n        AT4[recall_memory]\n    end\n    \n    AC -->|invoke| TR\n    TR -->|校验参数| V[_validate]\n    TR -->|handler| AT1\n    TR -->|handler| AT2\n    TR -->|handler| AT3\n    TR -->|handler| AT4\n    AT1 -->|result| OB[Observation]\n    OB -->|追加到消息历史| M\n    \n    style TR fill:#ffd700,stroke:#b8860b,color:#000",
+                "caption": "Function Calling 流程：模型决策 → ToolRegistry 校验 → 工具执行 → Observation 反馈"
+              }
+            },
+            {
+              "type": "text",
+              "text": "**AgentTool 数据结构**\n\n每个工具由 4 个字段定义：\n\n```python\n@dataclass(frozen=True)\nclass AgentTool:\n    name: str                        # 工具名称（唯一标识）\n    description: str                 # 工具描述（给模型看）\n    parameters: Dict[str, Any]       # JSON Schema（参数定义）\n    handler: Callable[..., Any]      # 实际执行函数\n```\n\n**关键设计**：`parameters` 使用 JSON Schema 格式，这和 OpenAI Function Calling 的参数定义方式一致。模型看到的工具列表是通过 `catalog()` 方法生成的，只包含 name/description/parameters，不包含 handler（handler 是后端实现细节）。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# 实际的 4 个工具定义（来自 agents.py）\n\ndef _build_tools(parsed_diff, store, tenant_id, repository):\n    # ... 工具函数定义 ...\n    return ToolRegistry([\n        AgentTool(\n            \"search_diff\",\n            \"Search the PR diff for an exact case-insensitive text fragment.\",\n            {\n                \"type\": \"object\",\n                \"properties\": {\n                    \"query\": {\"type\": \"string\", \"description\": \"Text to search for\"},\n                    \"limit\": {\"type\": \"integer\", \"description\": \"Max results\", \"default\": 10, \"minimum\": 1, \"maximum\": 50}\n                },\n                \"required\": [\"query\"],\n                \"additionalProperties\": False,\n            },\n            search_diff,  # 实际执行函数\n        ),\n        AgentTool(\n            \"changed_line\",\n            \"Read one added line by new-file path and line number.\",\n            {\n                \"type\": \"object\",\n                \"properties\": {\n                    \"path\": {\"type\": \"string\"},\n                    \"line\": {\"type\": \"integer\", \"minimum\": 1},\n                },\n                \"required\": [\"path\", \"line\"],\n                \"additionalProperties\": False,\n            },\n            changed_line,\n        ),\n        AgentTool(\n            \"list_changed_files\",\n            \"List files changed by this PR.\",\n            {\"type\": \"object\", \"properties\": {}, \"additionalProperties\": False},\n            list_changed_files,\n        ),\n        AgentTool(\n            \"recall_memory\",\n            \"Recall repository-scoped review experience relevant to a query.\",\n            {\n                \"type\": \"object\",\n                \"properties\": {\n                    \"query\": {\"type\": \"string\"},\n                    \"limit\": {\"type\": \"integer\", \"minimum\": 1, \"maximum\": 10, \"default\": 3},\n                },\n                \"required\": [\"query\"],\n                \"additionalProperties\": False,\n            },\n            recall_memory,\n        ),\n    ])"
+              }
+            },
+            {
+              "type": "text",
+              "text": "**四层参数校验**\n\n`ToolRegistry._validate()` 对每次工具调用执行四层校验，这是 Function Calling 安全性的核心：\n\n| 层级 | 校验内容 | 示例 |\n|------|---------|------|\n| 1. 必填参数 | `required` 中的字段必须存在 | 缺少 `query` → 报错 |\n| 2. 类型匹配 | 参数值必须符合声明的 `type` | `limit=\"ten\"` → 报错（应为 integer）|\n| 3. 禁止额外字段 | `additionalProperties: false` 时不允许未知参数 | 传入 `hack=true` → 报错 |\n| 4. 值范围 | `minimum`/`maximum` 约束 | `limit=100` → 报错（超过 maximum=50）|\n\n**为什么需要四层？**\n- LLM 可能产生格式错误的参数（类型错误、缺少必填项）\n- 恶意输入可能通过工具参数注入（如 SQL 注入）\n- 四层校验确保只有合法参数才能到达 handler"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# ToolRegistry._validate：四层参数校验\n@staticmethod\ndef _validate(schema: Dict[str, Any], arguments: Dict[str, Any]) -> None:\n    # 第 0 层：arguments 必须是 dict\n    if not isinstance(arguments, dict):\n        raise AgentLoopProtocolError(\"tool arguments must be an object\")\n    \n    properties = dict(schema.get(\"properties\") or {})\n    required = set(schema.get(\"required\") or [])\n    \n    # 第 1 层：必填参数检查\n    missing = required.difference(arguments)\n    if missing:\n        raise AgentLoopProtocolError(\"missing required tool arguments: %s\" % missing)\n    \n    # 第 2 层：禁止额外字段（additionalProperties: false）\n    if schema.get(\"additionalProperties\", False) is False:\n        unknown = set(arguments).difference(properties)\n        if unknown:\n            raise AgentLoopProtocolError(\"unknown tool arguments: %s\" % unknown)\n    \n    # 第 3 层：类型匹配\n    expected_types = {\n        \"string\": str, \"integer\": int, \"number\": (int, float),\n        \"boolean\": bool, \"object\": dict, \"array\": list,\n    }\n    for key, value in arguments.items():\n        spec = properties.get(key) or {}\n        expected = expected_types.get(spec.get(\"type\"))\n        if expected and not isinstance(value, expected):\n            raise AgentLoopProtocolError(\"tool argument %s must be %s\" % (key, spec.get(\"type\")))\n    \n    # 第 4 层：值范围（minimum/maximum）\n    for key, value in arguments.items():\n        if isinstance(value, (int, float)):\n            spec = properties.get(key) or {}\n            if \"minimum\" in spec and value < spec[\"minimum\"]:\n                raise AgentLoopProtocolError(\"tool argument %s is below minimum\" % key)\n            if \"maximum\" in spec and value > spec[\"maximum\"]:\n                raise AgentLoopProtocolError(\"tool argument %s exceeds maximum\" % key)"
+              }
+            },
+            {
+              "type": "text",
+              "text": "**invoke：工具执行的完整流程**\n\n```python\ndef invoke(self, name: str, arguments: Dict[str, Any]) -> Any:\n    tool = self._tools.get(name)\n    if tool is None:\n        raise AgentLoopProtocolError(\"unknown agent tool: %s\" % name)\n    self._validate(tool.parameters, arguments)  # 四层校验\n    return tool.handler(**arguments)            # 执行 handler\n```\n\n**错误处理**：\n- 工具不存在 → `AgentLoopProtocolError`\n- 参数校验失败 → `AgentLoopProtocolError`\n- handler 执行异常 → 被 AgentLoop 捕获，记录为 observation（`ok=False`）\n\n**关键细节**：校验错误和 handler 异常都被记录为 observation，模型可以在下一轮看到错误并调整策略。这是 ReAct 模式中「Observe」阶段的核心。"
+            },
+            {
+              "type": "table",
+              "table": {
+                "headers": [
+                  "对比项",
+                  "EvoAgent ToolRegistry",
+                  "OpenAI Function Calling",
+                  "LangChain Tool"
+                ],
+                "rows": [
+                  [
+                    "工具声明",
+                    "AgentTool dataclass",
+                    "JSON tools 参数",
+                    "@tool 装饰器"
+                  ],
+                  [
+                    "参数校验",
+                    "自建 JSON Schema 校验",
+                    "Provider 侧校验",
+                    "Pydantic 自动校验"
+                  ],
+                  [
+                    "错误处理",
+                    "AgentLoopProtocolError",
+                    "Provider 返回错误",
+                    "ToolException"
+                  ],
+                  [
+                    "结果格式",
+                    "JSON/str 自动序列化",
+                    "字符串返回",
+                    "字符串返回"
+                  ],
+                  [
+                    "依赖",
+                    "无（纯 Python）",
+                    "openai SDK",
+                    "langchain 框架"
+                  ]
+                ]
+              }
+            },
+            {
+              "type": "text",
+              "text": "**面试追问：为什么不直接用 OpenAI 的 Function Calling？**\n\nEvoAgent 选择自建的原因：\n1. **模型无关**：自建实现可以对接任何 LLM Provider（OpenAI、Anthropic、本地模型），不绑定 OpenAI SDK\n2. **可控性**：四层校验逻辑完全可控，可以根据业务需求调整校验规则\n3. **轻量**：不需要引入 openai SDK 或 langchain 框架，减少依赖\n4. **可测试**：自建实现可以在单元测试中 mock，不需要真实的 LLM 调用\n\n**代价**：需要自己维护参数校验逻辑，且不支持 OpenAI 的某些高级特性（如 parallel function calling）。"
+            },
+            {
+              "type": "text",
+              "text": "**面试追问：catalog() 生成的工具列表怎么传给模型？**\n\n```python\n# agents.py 中的实际调用\ntools = _build_tools(parsed_diff, store, tenant_id, repository)\nstate = {\n    # ... 其他字段 ...\n    \"available_tools\": tools.catalog(),  # 生成工具列表\n}\n\n# AgentLoop 每轮重新组装上下文时\ncontext = context_manager.compose(\n    # ... 其他参数 ...\n    tools=tools.catalog(),  # 工具列表作为上下文的一部分\n)\n```\n\n`catalog()` 返回的格式：\n```json\n[\n  {\"name\": \"search_diff\", \"description\": \"Search the PR diff...\", \"parameters\": {...}},\n  {\"name\": \"changed_line\", \"description\": \"Read one added line...\", \"parameters\": {...}},\n  ...\n]\n```\n\n这个列表被序列化进 Prompt 的 system/user 消息中，模型据此决定调用哪个工具。"
+            }
+          ]
+        },
+        {
           "title": "ReviewHarness：审查工作流状态机",
           "anchor": "practice-runtime-harness",
           "groupTitle": "Agent 运行时模块",
