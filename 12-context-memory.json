@@ -112,23 +112,82 @@
           "blocks": [
             {
               "type": "text",
-              "text": "MemoryManager 实现了 4 种记忆作用域：working（任务执行中的临时记忆，TTL 24h）、episodic（任务完成后的经验归档）、semantic（从反馈中学到的长期知识）、procedural（操作程序记忆）。每条记忆都有 importance 分数和过期时间。"
+              "text": "MemoryManager 实现了**三层分层记忆**，对应人类认知的短期记忆和长期记忆：\n\n| 层级 | Scope | 性质 | TTL | 内容 |\n|------|-------|------|-----|------|\n| 短期 | `working` | 任务内临时状态 | 24 小时 | AgentLoop 每轮的中间结果、工具调用细节 |\n| 长期 | `episodic` | 经验归档 | 永久 | 任务摘要、Finding 审批记录（approved/rejected）|\n| 长期 | `semantic` | 用户反馈 | 永久 | 误报/漏报/坏修复反馈，importance=0.95 |\n\n**关键流程**：\n1. **执行期间**：AgentLoop 把每轮细节写入 `working`\n2. **任务完成**：`consolidate_task()` 把摘要压缩写入 `episodic`，然后 `forget_working()` 清理临时状态\n3. **用户反馈**：直接写入 `semantic`（importance 最高）\n4. **检索时**：`recall()` 默认搜索 `semantic` + `episodic`，不搜 `working`"
             },
             {
-              "type": "code",
-              "code": {
-                "language": "python",
-                "content": "# MemoryManager：核心类，封装了系统的关键行为和状态\nclass MemoryManager:\n    # recall：公开方法，实现核心业务逻辑\n    def recall(self, tenant_id, repository, query, scopes=(\"semantic\", \"episodic\")):\n        # 1. 清理过期记忆\n        self.store.purge_expired_agent_memories()\n        # 2. 获取候选记忆（最多 200 条）\n        # 初始化列表 candidates，用于收集/存储多条数据\n        candidates = self.store.list_agent_memories(tenant_id, repository, scopes, 200)\n        # 3. 基于 token 重叠的相关性评分\n        query_tokens = _tokens(query)\n        for item in candidates:\n            # 初始化集合 memory_tokens，用于去重和快速查找\n            memory_tokens = set(item[\"keywords\"]) | _tokens(item[\"content\"])\n            overlap = len(query_tokens.intersection(memory_tokens))\n            coverage = overlap / max(1, len(query_tokens))     # 查询覆盖率 55%\n            specificity = overlap / max(1, len(memory_tokens)) # 记忆特异性 15%\n            score = coverage * 0.55 + specificity * 0.15 + importance * 0.25 + 0.05 / (index + 1)\n        # 4. 按分数排序，返回 top-K\n        return sorted(ranked, key=lambda m: -m[\"recall_score\"])[:self.recall_limit]",
-                "caption": "记忆检索：基于 token 重叠的相关性评分"
+              "type": "diagram",
+              "diagram": {
+                "language": "mermaid",
+                "content": "graph LR\n    subgraph 短期记忆[\"短期记忆\"]\n        W[Working<br/>任务内临时状态]\n    end\n    subgraph 长期记忆[\"长期记忆\"]\n        E[Episodic<br/>经验归档]\n        S[Semantic<br/>用户反馈]\n    end\n    \n    AgentLoop -->|每轮写入| W\n    W -->|consolidate_task| E\n    W -->|forget_working| X[清理]\n    Feedback -->|直接写入| S\n    E -->|recall 检索| Agent\n    S -->|recall 检索| Agent\n    \n    style W fill:#ffd700,stroke:#b8860b,color:#000\n    style E fill:#90ee90,stroke:#228b22,color:#000\n    style S fill:#87ceeb,stroke:#4682b4,color:#000",
+                "caption": "三层记忆流转：Working → Episodic 归档，Feedback → Semantic 直写"
               }
             },
             {
               "type": "code",
               "code": {
                 "language": "python",
-                "content": "# consolidate_task：公开方法，实现核心业务逻辑\ndef consolidate_task(self, tenant_id, repository, task_id, summary):\n    \"\"\"任务完成后：归档摘要 → 释放 Working Memory\"\"\"\n    archived = self.remember(\n        tenant_id, repository, \"episodic\", \"task_summary\",\n        \"Review task %s completed: %s\" % (task_id, json.dumps(summary)),\n        metadata={\"summary\": summary}, task_id=task_id,\n        agent=\"agent-runtime\", importance=0.65,\n    )\n    self.forget_working(task_id)  # 释放临时工作记忆\n    return archived\n\n# remember_finding：公开方法，实现核心业务逻辑\ndef remember_finding(self, tenant_id, repository, task_id, finding, approved, reasons):\n    \"\"\"每个 finding 的裁决结果归档为 Episodic Memory\"\"\"\n    importance = 0.8 if approved else 0.45  # 被批准的 finding 更重要\n    return self.remember(tenant_id, repository, \"episodic\", \"finding_%s\" % decision, ...)\n\n# remember_feedback：公开方法，实现核心业务逻辑\ndef remember_feedback(self, tenant_id, repository, task_id, category, finding, note):\n    \"\"\"用户反馈归档为 Semantic Memory（长期学习）\"\"\"\n    importance = 0.95 if category in {\"false_positive\", \"missed_issue\"} else 0.7\n    return self.remember(tenant_id, repository, \"semantic\", \"review_feedback\", ...)",
-                "caption": "记忆生命周期：Working → Episodic 归档 → Semantic 学习"
+                "content": "# 1. 执行期间：AgentLoop 写入 Working Memory\nself.memory_manager.remember(\n    tenant_id, repository, \"working\", kind, detail,\n    task_id=task_id, agent=agent.name, importance=0.3,\n)\n\n# 2. 任务完成：归档为 Episodic + 清理 Working\ndef consolidate_task(self, tenant_id, repository, task_id, summary):\n    \"\"\"任务完成后：归档摘要 → 释放 Working Memory\"\"\"\n    archived = self.remember(\n        tenant_id, repository, \"episodic\", \"task_summary\",\n        \"Review task %s completed: %s\" % (task_id, json.dumps(summary)),\n        metadata={\"summary\": summary}, task_id=task_id,\n        agent=\"agent-runtime\", importance=0.65,\n    )\n    self.forget_working(task_id)  # 释放临时工作记忆\n    return archived\n\n# 3. 用户反馈：直接写入 Semantic（importance 最高）\ndef remember_feedback(self, tenant_id, repository, task_id, category, finding, note):\n    return self.remember(\n        tenant_id, repository, \"semantic\", \"review_feedback\",\n        \"Feedback %s for %s...\" % (category, finding.get(\"rule_id\", \"task\")),\n        metadata={\"category\": category, \"finding\": finding},\n        task_id=task_id,\n        importance=0.95 if category in {\"false_positive\", \"missed_issue\", \"bad_fix\"} else 0.7,\n    )\n\n# 4. 检索：默认搜索长期记忆，不搜 Working\ndef recall(self, tenant_id, repository, query, scopes=(\"semantic\", \"episodic\")):\n    # 清理过期记忆\n    self.store.purge_expired_agent_memories()\n    # 检索并排序（基于 token 重叠 + importance）\n    candidates = self.store.list_agent_memories(tenant_id, repository, scopes, 200)\n    # ... 评分逻辑 ...\n    return sorted(ranked, key=lambda x: -x[\"recall_score\"])[:limit]"
               }
+            },
+            {
+              "type": "table",
+              "table": {
+                "headers": [
+                  "写入时机",
+                  "Scope",
+                  "Kind",
+                  "Importance",
+                  "TTL"
+                ],
+                "rows": [
+                  [
+                    "AgentLoop 每轮",
+                    "working",
+                    "中间状态",
+                    "0.3",
+                    "24h"
+                  ],
+                  [
+                    "Finding 审批通过",
+                    "episodic",
+                    "finding_approved",
+                    "0.8",
+                    "永久"
+                  ],
+                  [
+                    "Finding 被拒绝",
+                    "episodic",
+                    "finding_rejected",
+                    "0.45",
+                    "永久"
+                  ],
+                  [
+                    "任务完成归档",
+                    "episodic",
+                    "task_summary",
+                    "0.65",
+                    "永久"
+                  ],
+                  [
+                    "用户反馈（误报/漏报）",
+                    "semantic",
+                    "review_feedback",
+                    "0.95",
+                    "永久"
+                  ],
+                  [
+                    "用户反馈（其他）",
+                    "semantic",
+                    "review_feedback",
+                    "0.7",
+                    "永久"
+                  ]
+                ]
+              }
+            },
+            {
+              "type": "text",
+              "text": "**为什么这样设计？**\n\n- **Working 有 TTL**：任务执行中的中间状态只在当前任务有用，24 小时后自动清理\n- **Episodic 永久保留**：历史审查经验（哪些 Finding 被接受/拒绝）可以指导未来任务\n- **Semantic importance 最高**：用户反馈是最有价值的信号，检索时优先级最高\n- **recall 不搜 Working**：避免当前任务的临时状态污染检索结果\n\n**面试追问**：这和 RAG 系统中的向量数据库有什么区别？EvoAgent 的记忆检索是基于 token 重叠的简单匹配，不是向量相似度。优点是轻量、可解释；缺点是无法捕捉语义相似性。"
             }
           ]
         },
