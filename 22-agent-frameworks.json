@@ -15,7 +15,7 @@
               "code": {
                 "language": "python",
                 "caption": "EvoAgent 自建 Runtime 的核心调用链",
-                "content": "# EvoAgent 的调用链：Harness → Runtime → AgentLoop → ToolRegistry\n#\n# ReviewHarness.run()               ← 入口：任务生命周期管理\n#   └─ AgentRuntime.execute()       ← 节点编排：planning → executing → reviewing\n#        └─ MultiAgentCoordinator.review_with_context()  ← 多 Agent 协作\n#             └─ AgentLoop.run()     ← ReAct 循环：tool/final 二选一\n#                  └─ ToolRegistry.invoke()  ← 工具调用 + 参数校验\n#\n# 对比主流框架的等价调用链：\n# OpenAI Agents SDK: Runner.run(agent) → Agent.run() → handoff/tool\n# LangGraph:         graph.invoke() → StateGraph → nodes → edges → tools\n# CrewAI:            crew.kickoff() → Agent → Task → Tool"
+                "content": "# EvoAgent 的调用链：Harness → Runtime → AgentLoop → ToolRegistry\n#\n# ReviewHarness.run()               ← 入口：任务生命周期管理\n#   └─ AgentRuntime.execute()       ← 节点编排：planning → executing → reviewing\n#        └─ MultiAgentCoordinator.review_with_context()  ← 多 Agent 协作\n#             └─ AgentLoop.run()     ← ReAct 循环：tool/final 二选一\n#                  └─ ToolRegistry.invoke()  ← 工具调用 + 参数校验\n#\n# 对比 LangChain/LangGraph 等价调用链：\n# LangGraph: graph.invoke() → StateGraph → nodes → edges → tools\n# LangChain: chain.invoke() → LLM → output_parser"
               }
             }
           ],
