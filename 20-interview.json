@@ -128,6 +128,30 @@
               "category": "架构可替换性",
               "question": "如果让你把这套系统从审查代码改成审查设计文档，哪些模块需要改，哪些不用？",
               "answer": "**需要改的**：\n- DiffParser：设计文档不是 unified diff，需要换成文档解析器\n- Reviewer 实现：LocalRuleReviewer 的规则是针对代码的（eval、shell=True），需要换成文档审查规则\n- Prompt：LLM Reviewer 的 system prompt 和输出 schema 需要重新设计\n- 自动修复：当前的白名单文本修复是针对代码的\n\n**不需要改的**：\n- ReviewHarness：状态机、预算控制、checkpoint 完全不关心审查对象是什么\n- AgentRuntime：节点执行、步骤预算、超时检查是通用的\n- TaskStore/TaskQueue：任务存储和队列与业务无关\n- ContextManager/MemoryManager：上下文和记忆管理是通用的\n- EvolutionEngine：反馈驱动的进化机制不依赖具体业务\n\n**这证明了架构的可替换性**：核心运行时和基础设施层完全不关心「审查什么」，只需要替换接入层和审查层的实现。这是分层架构的直接收益。"
+            },
+            {
+              "type": "question",
+              "category": "端到端闭环",
+              "question": "从一次 PR 审查到系统自我进化，完整的数据闭环是怎样的？",
+              "answer": "**审查链路（一次 PR 的完整旅程）**：\n1. GitHub Webhook → API 层校验 HMAC 签名 → delivery ID 幂等认领\n2. ReviewService 创建任务 → 投递异步队列\n3. Worker 取任务 → ReviewHarness 启动\n4. PLANNING 节点：DiffParser 解析 diff，提取新增行和文件\n5. EXECUTING 节点：MultiAgentCoordinator 调度 Specialist 并行审查\n6. REVIEWING 节点：Verifier + Arbiter 验证和汇总 Finding\n7. 生成 ReviewReport → 写入数据库 → 可选发布 GitHub 评论\n\n**进化链路（反馈驱动改进）**：\n1. 用户标记 Finding 为误报/漏报/坏修复\n2. 反馈写入 failure_cases 表\n3. EvolutionEngine.auto_propose() 读取未解决反馈\n4. 生成候选 Prompt（从反馈中提取规则关注点）\n5. 在 Validation + Holdout 上回放 baseline vs candidate\n6. 门禁判断：Validation F1 提升 ≥ 0.01 + Holdout 不退化\n7. 通过则激活新版本，下次审查使用新 Prompt\n\n**闭环的关键衔接点**：failure_cases 表。审查结果通过用户反馈回流为失败案例，失败案例驱动 Prompt/Skill 进化，进化后的新版本在下次审查中使用。形成「审查 → 反馈 → 进化 → 审查」的闭环。"
+            },
+            {
+              "type": "question",
+              "category": "重试机制",
+              "question": "系统有几层重试机制？各层解决什么问题？能互相替代吗？",
+              "answer": "**三层独立重试，解决不同层面的问题**：\n\n**第一层：Agent 层重试（agent_retries）**\n- 位置：MultiAgentCoordinator._run_agent_loop()\n- 默认值：agent_retries=1（最多重试 1 次，共执行 2 次）\n- 解决的问题：单个 Specialist 调用 LLM 时网络抖动、Provider 临时故障\n- 代码：`for attempt in range(1, self.agent_retries + 2)`\n\n**第二层：Harness 节点层重试（node_retries）**\n- 位置：AgentRuntime.execute()\n- 默认值：node_retries=2（最多重试 2 次，共执行 3 次）\n- 解决的问题：整个 executing 节点失败（如 Coordinator 内部异常）\n- 代码：`for offset in range(1, retries + 2)`\n- 非重试异常（ValueError, RuntimeCancelled, RuntimeBudgetExceeded）立即抛出\n\n**第三层：队列重试（max_attempts）**\n- 位置：TaskQueue.process()\n- 默认值：max_attempts=3\n- 解决的问题：Worker 崩溃、进程被 kill、机器重启\n- 机制：任务失败后重新入队，attempt 计数器递增，超过 max_attempts 进入死信队列\n\n**能互相替代吗？**\n- 不能。Agent 层重试粒度最细（单个 LLM 调用），Harness 层重试粒度中等（整个节点），队列层重试粒度最粗（整个任务）\n- Agent 层重试无法恢复 Worker 崩溃，队列层重试无法恢复 LLM 临时故障\n- 如果所有层都失败，任务最终进入 FAILED 状态并记录到死信队列"
+            },
+            {
+              "type": "question",
+              "category": "Reflection",
+              "question": "ReflectionAgent 在质疑-修订循环中做什么？它和 Critic 的分工是什么？",
+              "answer": "**Critic 负责发现问题，Reflection 负责分析问题并生成修订指导。**\n\n**CriticAgent.analyze()** 输出 Critique：\n- objections：具体质疑点（如「证据引用了未修改的行」「CWE 类型不匹配」）\n- questions：需要 Specialist 回答的问题\n- requires_revision：布尔值，是否需要修订\n- confidence_adjustment：-0.35（有质疑）/ +0.08（多来源交叉验证）/ +0.03（单来源确认）\n\n**ReflectionAgent.reflect()** 输入 Critique，输出 Reflection：\n- revision_needed：是否真的需要 Specialist 修订（基于 critique.requires_revision）\n- guidance：修订指导列表\n  - 合并 objections + questions 作为基础指导\n  - 如果 requires_revision=True，追加指导：「Review the source code again, focusing on the objections above, and revise your finding with more precise evidence」\n  - round：当前是第几轮（最多 2 轮）\n\n**为什么需要 Reflection 而不是直接让 Specialist 看 Critique？**\n- Critique 是结构化的检查清单，对 Specialist 来说信息密度低\n- Reflection 将 Critique 转化为可操作的修订指导\n- 如果 revision_needed=False，Specialist 不需要修订，直接跳过\n- 这减少了不必要的 LLM 调用，节约 Token\n\n**代码体现**：\n```python\ndef reflect(self, critique: Critique) -> Reflection:\n    guidance = list(critique.objections)\n    guidance.extend(critique.questions)\n    if critique.requires_revision:\n        guidance.append(\"Review the source code again...\")\n    return Reflection(critique.finding_key, critique.requires_revision, guidance, critique.round)\n```"
+            },
+            {
+              "type": "question",
+              "category": "置信度校准",
+              "question": "Finding 的 confidence 从初始值到最终值经历了哪些调整？完整的校准链路是什么？",
+              "answer": "**置信度校准链路（4 个阶段）**：\n\n**1. Specialist 初始输出**\n- Specialist 根据代码分析给出初始 confidence（通常 0.6 ~ 0.85）\n- 这是一个主观评估，可能偏高\n\n**2. Critic 质疑调整**\n- CriticAgent.analyze() 执行 5 项检查\n- 如果有 objections → confidence_adjustment = -0.35\n- 如果无 objections 且有多来源交叉验证（peer_sources > 1）→ +0.08\n- 如果无 objections 且单来源确认 → +0.03\n- 代码：`adjustment = -.35 if objections else (.08 if len(peer_sources) > 1 else .03)`\n\n**3. 调整后 clamp**\n- `confidence = max(0.0, min(1.0, finding.confidence + adjustment))`\n- 确保在 [0, 1] 范围内\n\n**4. Verifier 阈值过滤**\n- `if confidence < 0.55: reasons.append(\"confidence is below the verification threshold\")`\n- confidence < 0.55 的 Finding 被 Verifier 拒绝\n- 只有通过 Verifier 的 Finding 才进入最终报告\n\n**完整链路示例**：\n```\nSpecialist: confidence=0.75\n  → Critic 发现证据不匹配: adjustment=-0.35 → confidence=0.40\n  → Verifier: 0.40 < 0.55 → 拒绝\n\nSpecialist: confidence=0.75\n  → Critic 无质疑，多来源: adjustment=+0.08 → confidence=0.83\n  → Verifier: 0.83 >= 0.55 → 通过\n```\n\n**面试追问：为什么不直接用 Specialist 的初始值？**\n- Specialist 是 LLM，容易过度自信\n- Critic 作为独立角色，提供质疑和交叉验证\n- 最终通过 Verifier 的阈值过滤，确保进入报告的 Finding 质量"
             }
           ]
         }
@@ -178,6 +202,12 @@
               "category": "Diff 边界",
               "question": "如果模型把旧代码的问题当成新增行引入的问题来报告，你怎么防？",
               "answer": "这是 PR 审查的一个核心挑战——**区分「本次引入的问题」和「仓库原本就有的问题」**。\n\n**EvoAgent 的策略**：\n1. **DiffParser 精确提取新增行**：解析器从 hunk 头读取新文件起始行号，只把以 `+` 开头的行标记为新增。上下文行和删除行不计入。\n2. **Reviewer 只接收新增行**：LocalRuleReviewer 和 LLM Reviewer 都只在新增行上匹配规则。\n3. **Coordinator 做最终门禁**：即使 Reviewer 漏过了，Coordinator 也会检查 Finding 的 (path, line) 是否在新增行集合中。\n\n**代价**：\n- 删除权限检查可能漏报（删除了安全校验代码）\n- 跨行问题难以检测（问题在新增行，但原因在旧代码）\n- 上下文组合问题（新增行本身没问题，但和旧代码组合后有问题）\n\n**面试延伸**：这是一个典型的 Precision vs Recall 权衡。只检查新增行提高了 Precision（减少误报），但牺牲了 Recall（可能漏报跨行问题）。EvoAgent 选择了高 Precision，因为误报会严重损害用户信任。"
+            },
+            {
+              "type": "question",
+              "category": "可观测性",
+              "question": "你的系统如何实现执行链路回放和失败归因？和 OpenTelemetry 是什么关系？",
+              "answer": "**两种回放机制互补**：\n\n**1. 业务级回放（trace_events + agent_messages + checkpoints）**\n- **trace_events**：记录状态迁移事件（TraceEvent），包含 step、state、message、timestamp\n- **agent_messages**：记录 Agent 间通信（AgentMessage），包含 sender、recipient、kind、content、correlation_id\n- **checkpoints**：记录节点执行结果，包含 attempt、status（completed/failed）、error\n\n回放时，按时间戳排序这三类事件，可以重建完整的执行时间线：\n```\n[step=0] PLANNING started\n[step=1] PLANNING completed, parsed 5 files\n[step=2] EXECUTING started\n[step=2] AgentMessage: Planner → Specialist-1, assignment\n[step=2] AgentMessage: Specialist-1 → Critic, finding SEC-EVAL\n[step=3] checkpoint: executing, attempt=1, status=completed\n[step=4] REVIEWING started\n[step=5] SUCCESS: 3 findings verified\n```\n\n**2. 分布式追踪回放（OpenTelemetry spans）**\n- AgentRuntime 接受 span_factory 参数（依赖注入）\n- 每个节点执行前创建 span：`span_factory(\"runtime.planning\", attrs)`\n- span 记录 task_id、node、attempt、runtime_step\n- 在 Jaeger/Zipkin 中可以查看每个节点的耗时、异常、子 span\n\n**失败归因的三层定位**：\n1. trace_events 定位失败节点（哪个状态迁移触发了 FAILED）\n2. checkpoint 的 attempt 和 error 字段定位重试历史\n3. agent_messages 的 kind=\"agent_failure\" 定位具体 Agent 的错误\n\n**和 OpenTelemetry 的关系**：\n- OpenTelemetry 是可选的，通过 span_factory 注入\n- 不配置 OpenTelemetry 时，使用 nullcontext()，不影响功能\n- Observability 类做了优雅降级：`try: from opentelemetry ... except ImportError: tracer = None`"
             }
           ]
         }
@@ -272,6 +302,18 @@
               "category": "API 设计",
               "question": "同步 API 和异步 API 共存的设计，什么场景下该用哪种？",
               "answer": "**同步 API**：\n- 调用方发送请求后阻塞等待，直到审查完成\n- 适合：小 diff、调试、CI 流水线中的快速检查\n- 优点：简单直接，一次调用拿到完整结果\n- 缺点：长 diff 可能超时（HTTP 连接超时）\n\n**异步 API**：\n- 调用方发送请求后立即拿到 task_id，通过轮询或 Webhook 获取结果\n- 适合：大 diff、Webhook 触发、外部模型（延迟不可控）\n- 优点：不阻塞调用方，可以处理长时间运行的任务\n- 缺点：需要额外的状态查询接口\n\n**EvoAgent 的实现**：\n- 同一个 POST /v1/review 接口，根据参数决定同步/异步\n- 同步模式：在当前线程执行 ReviewHarness，完成后返回\n- 异步模式：创建 deferred task，投递到 TaskQueue，立即返回 task_id\n- Webhook 触发时默认异步（因为 diff 可能很大，且需要处理 GitHub 超时）\n\n**面试延伸**：这和 Celery 的设计类似——.delay() 返回 AsyncResult（异步），.apply() 同步执行。区别是 EvoAgent 把两种模式统一在同一个 API 中。"
+            },
+            {
+              "type": "question",
+              "category": "记忆隔离",
+              "question": "记忆系统如何实现多租户隔离？Working Memory 的过期清理机制是什么？",
+              "answer": "**多租户隔离**：\n- 每条记忆记录 tenant_id 和 repository 字段\n- remember() 写入时：`self.store.save_agent_memory(record)` 保存 tenant_id\n- recall() 查询时：`self.store.list_agent_memories(tenant_id, repository, scopes, 200)` 按 tenant_id + repository 过滤\n- 不同租户、不同仓库的记忆完全隔离，即使查询词相同也不会跨租户返回\n\n**Working Memory 过期清理**：\n- Working scope 的记忆设置 TTL：默认 24 小时（configurable via EVOAGENT_MEMORY_WORKING_TTL_SECONDS）\n- 过期时间计算：`expires_at = (now + ttl).isoformat()`\n- recall() 每次调用前先执行：`self.store.purge_expired_agent_memories()` 清理所有过期记忆\n- 这确保过期的 Working Memory 不会被检索到\n\n**主动清理**：\n- consolidate_task() 在任务完成时：\n  1. 将任务摘要归档为 Episodic 记忆（importance=0.65）\n  2. 调用 forget_working(task_id) 删除该任务的所有 Working 记忆\n- 这样 Working Memory 只在任务执行期间存在，任务结束后要么归档为 Episodic，要么直接清理\n\n**面试追问：为什么 recall 默认不搜 Working？**\n- Working 是临时状态，包含当前任务的中间结果\n- 如果搜 Working，会把当前任务的临时状态混入检索结果，干扰跨任务的经验召回\n- 默认 scopes=(\"semantic\", \"episodic\") 只搜长期记忆"
+            },
+            {
+              "type": "question",
+              "category": "Run Trace",
+              "question": "Run Trace 记录了哪些信息？如何利用 Trace 做审计和调试？",
+              "answer": "**Run Trace 的三层数据结构**：\n\n**1. trace_events（状态迁移事件）**\n```python\nclass TraceEvent:\n    step: int           # 运行时步数\n    state: TaskState    # 目标状态（PLANNING/EXECUTING/REVIEWING/SUCCESS/FAILED/CANCELLED）\n    message: str        # 描述信息\n    timestamp: datetime # 时间戳\n```\n- 记录每个状态迁移：PLANNING started → PLANNING completed → EXECUTING started → ...\n- 失败时记录错误信息：`TraceEvent(step, FAILED, \"Review failed: %s\" % exc, utc_now())`\n\n**2. agent_messages（Agent 间通信）**\n```python\nclass AgentMessage:\n    sender: str         # 发送者（Planner/Specialist-1/Critic/Evidence/Verifier）\n    recipient: str      # 接收者（Coordinator/具体 Agent）\n    kind: str           # 消息类型（assignment/finding/critique/reflection_guidance/retry_request/agent_failure）\n    content: Any        # 消息内容\n    correlation_id: str # 关联 ID（用于追踪同一轮次的质疑-修订循环）\n```\n- 12 种消息类型，覆盖协作全流程\n- correlation_id 可以追踪同一 Finding 的完整质疑-修订-验证链路\n\n**3. checkpoints（节点执行结果）**\n```python\n{\n    \"task_id\": str,\n    \"node\": str,           # planning/executing/reviewing\n    \"attempt\": int,        # 第几次尝试\n    \"status\": str,         # completed/failed/cancelled\n    \"result\": Any,         # 节点输出\n    \"error\": str           # 失败时的错误信息（截断到 1000 字符）\n}\n```\n\n**审计和调试**：\n- **回放**：按时间戳排序 trace_events + agent_messages + checkpoints，重建执行时间线\n- **归因**：失败时定位 trace_events 中的 FAILED 事件 → 查看 checkpoint 的 attempt 和 error → 查看 agent_messages 的 agent_failure\n- **统计**：从 agent_messages 统计重试次数（kind=\"retry_request\"）、质疑次数（kind=\"critique\"）、修订次数（kind=\"reflection_guidance\"）"
             }
           ]
         }
@@ -322,6 +364,24 @@
               "category": "自进化",
               "question": "Feedback → Prompt 候选 → 回放 → 激活 这条链路，和传统 CI/CD 有什么相似之处？",
               "answer": "这条链路本质上是一个**自动化的质量门禁流水线**，和 CI/CD 高度相似：\n\n| 环节 | EvoAgent | CI/CD |\n|------|----------|-------|\n| 触发源 | 用户反馈（误报/漏报） | 代码提交（git push） |\n| 构建 | 从反馈生成 Prompt 候选 | 编译代码（build） |\n| 测试 | 在 Validation + Holdout 上回放 | 运行单元测试 + 集成测试 |\n| 门禁 | F1 提升 + 受保护指标不退化 | 测试全通过 + 覆盖率不降 |\n| 部署 | 激活候选 Prompt | 部署到生产环境 |\n| 回滚 | 激活旧版本 Prompt | 回滚到上一个部署版本 |\n| 审计 | evolution_runs 表记录每次运行 | CI/CD 日志 |\n\n**关键区别**：\n- CI/CD 的测试是确定性的（代码对或错），Prompt 评测是概率性的（模型输出有随机性）\n- CI/CD 可以自动回滚（健康检查失败），Prompt 回滚需要人工触发\n- CI/CD 的反馈是自动的（测试失败），Prompt 的反馈来自人工标注\n\n**面试延伸**：如果面试官问「怎么改进这条链路」，可以回答：引入影子运行（新 Prompt 在生产流量上运行但不影响结果）和灰度发布（先用 10% 流量验证新 Prompt）。"
+            },
+            {
+              "type": "question",
+              "category": "候选去重",
+              "question": "如果系统同时产生了两个相似的候选 Prompt，如何避免重复评测？候选去重机制是什么？",
+              "answer": "**去重机制基于 SHA-256 指纹**：\n\n**Prompt 去重**：\n- 每个 Prompt 版本计算 SHA-256 哈希：`prompt_sha256 = hashlib.sha256(prompt_text.encode()).hexdigest()`\n- 存入 evolution_runs 表时，相同指纹的候选不会重复创建\n- 如果两个候选内容完全相同，只需评测一次\n\n**Skill artifact 去重**：\n- 类似地，skill_artifact_versions 表记录每个版本的 artifact_sha256\n- 创建新版本时检查是否已存在相同指纹\n\n**候选生成的去重**：\n- auto_propose() 只处理未解决的反馈（status != \"resolved\"）\n- 同一个 feedback 不会重复生成候选\n- 如果反馈已经被之前的候选覆盖，标记为 resolved\n\n**面试追问：如果两个候选内容不同但效果相同怎么办？**\n- 当前只做了精确去重（SHA-256），没有做语义去重\n- 两个内容不同但效果相同的候选会分别评测\n- 这是设计取舍：精确去重简单可靠，语义去重需要额外的相似度计算，可能引入误判"
+            },
+            {
+              "type": "question",
+              "category": "进化证明",
+              "question": "evolution_proof.py 解决了什么问题？claim_scope 为什么声明「受控离线行为进化」？",
+              "answer": "**解决的问题**：证明「反馈 → 候选 → 回放 → 激活」这条机制确实能改变 Agent 行为。\n\n**证明流程**（run_prompt_evolution_proof.py）：\n1. 生成 130 条样本（Validation 104 + Holdout 26，来自 10 个仓库）\n2. 使用 Prompt v1 回放 Validation\n3. 收集 Validation 中确认的漏报反馈\n4. 提取格式合法的 rule_id，生成 Prompt v2 的关注规则\n5. 在 Holdout 上比较 v1 和 v2\n6. 保存版本链、Prompt SHA-256、数据集指纹、反馈使用数量、门禁结果\n\n**claim_scope 的安全设计**：\n- 声明：「受控离线行为进化」\n- 含义：在受控环境中，反馈驱动的 Prompt 版本迭代确实改变了 Reviewer 的输出\n- **不声明**：\n  - 不声称 LLM 权重变好了（模型没变）\n  - 不声称真实 GitHub PR 的生产效果（数据来源是 synthetic-controlled）\n  - 不声称在线学习能力（这是离线回放）\n\n**为什么这样设计？**\n- 防止过度声称：面试官如果问「你的系统能自动变聪明吗」，回答「不能，只是在受控条件下证明了反馈机制有效」\n- release_gate 仍然因为数据来源（synthetic-controlled ≠ public-github-pr）而阻止生产激活\n- 这是工程上的诚实：证明机制有效 ≠ 证明生产可用"
+            },
+            {
+              "type": "question",
+              "category": "三臂评测",
+              "question": "评测为什么用三臂（legacy/baseline/candidate）而不是只比较新旧两版？数据集指纹解决什么问题？",
+              "answer": "**三臂对比的目的**：分离「规则扩充带来的提升」和「多 Agent 编排带来的提升」。\n\n**三臂定义**：\n- **legacy**：原始 6 条规则，单 Agent（历史参考基线）\n- **baseline**：14 条规则，单 Agent（公平基线，和多 Agent 用相同规则）\n- **candidate**：14 条规则，多 Agent 编排（Planner + Specialist + Critic + Evidence + Arbiter）\n\n**为什么需要 baseline？**\n- 如果只比较 legacy vs candidate，无法区分「规则从 6 条增加到 14 条」和「多 Agent 编排」各自的贡献\n- baseline 用相同规则但单 Agent，可以隔离出编排的增量效果\n\n**实际结果**（当前报告）：\n- legacy F1 = 71.4%\n- baseline F1 = 82.5%（规则扩充带来 +11.1pp）\n- candidate F1 = 82.5%（多 Agent 编排没有进一步提升 F1）\n- 但 high-risk recall 从 baseline 的 84.2% 提升到 candidate 的 94.7%\n\n**数据集指纹（dataset_fingerprint）**：\n- 计算方式：按样本 ID 排序 → 每个样本做稳定 JSON 序列化 → SHA-256\n- 作用：保证两次评测使用同一批数据\n- 防止：数据集变化导致的指标差异被误认为系统改进\n- 特性：JSONL 的字段顺序或空白变化不改变指纹，但样本内容、真值、Diff 变化都会改变"
             }
           ]
         }
@@ -366,6 +426,12 @@
               "category": "水平扩展",
               "question": "如果要把这套系统从单机部署改成多 Worker 水平扩展，哪些模块需要改？",
               "answer": "**需要改的**：\n\n**1. 任务队列**：\n- 单机内存队列 → Redis Streams（已支持）\n- 多个 Worker 通过 Consumer Group 并行消费\n- 需要处理消息的 ACK 和重试\n\n**2. 状态存储**：\n- SQLite → PostgreSQL（已支持）\n- 多个 Worker 共享同一个数据库\n- 需要处理并发写入（advisory lock 已实现）\n\n**3. 上下文管理**：\n- threading.local() 的请求隔离在单进程内有效\n- 多进程部署时，每个进程有独立的 thread-local 空间，不冲突\n\n**不需要改的**：\n- ReviewHarness：无状态，每次执行独立\n- AgentRuntime：无状态，只依赖输入参数\n- Reviewer 实现：无状态，纯函数式调用\n- DiffParser：无状态，输入 diff 输出 ParsedDiff\n\n**架构变化**：\n```\n单 Worker: API → Service → Harness → Reviewer\n多 Worker: API → Redis Streams → Worker 1/2/3 → Service → Harness → Reviewer\n```\n\n**面试延伸**：EvoAgent 的分层架构天然支持水平扩展——无状态的业务逻辑层可以任意扩展，有状态的持久化层通过 PostgreSQL 共享。这是 12-Factor App 的核心原则。"
+            },
+            {
+              "type": "question",
+              "category": "Redis 迁移",
+              "question": "为什么从 Redis List (BRPOP) 迁移到 Redis Streams？解决了什么核心问题？",
+              "answer": "**BRPOP 的问题：at-most-once 语义**\n- Worker 调用 BRPOP 取出消息后，消息立即从 list 消失\n- 如果 Worker 在处理过程中崩溃（进程被 kill、机器重启），消息永久丢失\n- 无法重新投递，任务永远丢失\n\n**Redis Streams 的解决方式：at-least-once 语义**\n- Worker 通过 XREADGROUP 从 Consumer Group 读取消息\n- 消息取出后进入 Pending 状态，不自动删除\n- Worker 完成任务后显式发送 XACK 确认\n- 如果 Worker 崩溃，消息留在 Pending 中\n- 其他 Worker 可以通过 XAUTOCLAIM 或 XPENDING + XCLAIM 重新认领\n\n**额外收益**：\n- **Consumer Group**：多个 Worker 并行消费，互不干扰\n- **Consumer 标识**：每个 Worker 有唯一 ID（hostname + uuid 后缀）\n- **死信队列**：消息被重试超过 max_attempts（默认 3 次）后进入死信队列\n- **消息历史**：已确认的消息仍然保留在 Stream 中（可配置保留策略）\n\n**代码体现**：\n- TaskQueue 初始化：`self.consumer = \"%s-%s\" % (socket.gethostname(), uuid.uuid4().hex[:8])`\n- 读取：`self.redis.xreadgroup(self.GROUP, self.consumer, {self.STREAM: \">\"}, count=1, block=1000)`\n- 确认：只在任务完成或安全重入队/DLQ 后才 XACK\n\n**面试追问：at-least-once 会不会导致重复处理？**\n- 会。Worker 可能在 XACK 前崩溃，导致消息被重新投递\n- 但 Harness 的 delivery ID 幂等控制防止了重复创建任务\n- 所以整体是 exactly-once 语义：消息可能投递多次，但任务只创建一次"
             }
           ]
         }
