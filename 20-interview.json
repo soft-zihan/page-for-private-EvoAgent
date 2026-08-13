@@ -4,6 +4,76 @@
   "description": "Agent 开发核心面试题 + 真实面经",
   "chapters": [
     {
+      "title": "零、简历写法参考",
+      "sections": [
+        {
+          "title": "项目描述与核心亮点",
+          "anchor": "resume-writing",
+          "groupTitle": "面试准备",
+          "difficulty": "beginner",
+          "estimatedMinutes": 10,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "**面试官看着简历问**，所以简历写法决定了面试方向。以下是经过验证的项目描述写法，每个 bullet 都对应源码可验证的实现。"
+            },
+            {
+              "type": "question",
+              "category": "项目概述",
+              "question": "项目名称和技术栈怎么写？",
+              "answer": "**项目名称**：PRAudit：自进化 Agent Runtime Harness 的 PR 风险治理与安全修复智能体\n\n**技术栈**：Python、Self-Evolution、Dynamic Skill Sandbox、Multi-Agent Pipeline、Redis Streams、PostgreSQL、Docker、Prometheus\n\n**注意**：\n- 「Harness Engineering」不是通用术语，面试官可能困惑，建议用「Agent Runtime」或直接去掉\n- 项目源码叫 EvoAgent，简历用 PRAudit 是为了去重（避免搜到），但如果面试官问「这个项目叫什么」，回答要一致"
+            },
+            {
+              "type": "question",
+              "category": "核心亮点",
+              "question": "第一个 bullet：端到端闭环怎么写？",
+              "answer": "**原版**（功能清单式，信息密度低）：\n> 构建可恢复的 Agent Runtime Harness，完成风险发现、证据复核、安全修复、结果验证、自动评测、反馈学习与版本回滚能力，实现研发风险治理的端到端闭环。\n\n**修正版**（拆成两个维度，逻辑清晰）：\n> 构建可恢复的 Agent Runtime Harness，串联**风险发现 → 证据复核 → 安全修复 → 结果验证**的审查链路，以及**自动评测 → 反馈学习 → 版本回滚**的进化链路，实现研发风险治理的端到端闭环。\n\n**为什么这样改？** 7 个并列名词堆在一起读起来像功能清单。拆成「审查链路」和「进化链路」两个维度，面试官更容易追问细节。"
+            },
+            {
+              "type": "question",
+              "category": "状态管理",
+              "question": "第二个 bullet：任务状态机怎么写？",
+              "answer": "**写法**：\n> 统一管理任务状态机（PENDING → PLANNING → EXECUTING → REVIEWING → SUCCESS/FAILED）、执行预算（max_steps/timeout）、节点重试、持久化 Checkpoint、任务取消、断点续跑及 Run Trace，保障长流程任务的可恢复性与容错能力。\n\n**面试追问准备**：\n- 状态机有哪几个状态？（7 个，见 08-runtime.json）\n- Checkpoint 以什么为主键？（task_id + node）\n- 为什么跨任务不复用 Checkpoint？（输入不同、模型可能更新、避免污染）"
+            },
+            {
+              "type": "question",
+              "category": "自进化",
+              "question": "第三个 bullet：自进化怎么写？",
+              "answer": "**写法**：\n> 将误报、漏报、坏修复及执行异常回流为失败案例，自动生成候选 Prompt 和声明式 Skill 版本，经安全性校验、Validation 提升和 Holdout 非退化门禁后自动激活，支持候选去重、历史版本追踪与一键回滚。\n\n**关键词解释**：\n- 「声明式 Skill」：evolved-* 开头的 JSON artifact，不是 Python 代码\n- 「Validation 提升」：候选在 Validation 数据集上 F1 提升 ≥ 0.01\n- 「Holdout 非退化」：候选在 Holdout 上受保护指标不退化\n- 「门禁」：两个条件都满足才能激活"
+            },
+            {
+              "type": "question",
+              "category": "多 Agent",
+              "question": "第四个 bullet：多 Agent 协作怎么写？",
+              "answer": "**写法**：\n> 根据变更范围与敏感路径生成任务计划，调度 Specialist 并行初审，通过 Critic 质疑、Reflection 修订、Evidence 独立复核、Verifier 验证和 Arbiter 裁决，完成 Finding 的证据校验、置信度校准、去重与排序。\n\n**面试追问准备**：\n- 为什么不是简单投票？（错误相关性、没有质疑机制）\n- Critic 为什么必须存在？（防止假阳性进入报告）\n- 同一个模型扮演多个角色等于真正独立吗？（不等于，错误可能高度相关）"
+            },
+            {
+              "type": "question",
+              "category": "评测",
+              "question": "第五个 bullet：评测 Harness 怎么写？",
+              "answer": "**写法**：\n> 基于 100 个受控 PR Diff（40 风险样本 + 60 干净样本）按仓库划分 Validation/Holdout，通过路径、行号区间和 CWE 类型进行一对一匹配，客观度量 Agent 能力迭代。\n\n**关键数字**：\n- 100 个 PR Diff：40 风险样本（有真实问题）+ 60 干净样本（无问题）\n- 按仓库划分：避免数据泄漏，同一仓库的样本要么全在 Validation，要么全在 Holdout\n- 匹配粒度：路径 + 行号区间（±2 行容差）+ CWE 类型"
+            },
+            {
+              "type": "question",
+              "category": "Agent Loop",
+              "question": "第六个 bullet：Agent Loop 怎么写？",
+              "answer": "**写法**：\n> 基于 Think、Tool Call、Observe、Final Answer 构建 ReAct 执行循环，记录节点状态、Agent 消息、重试、Checkpoint 和门禁结果，支持执行链路回放、失败归因与断点恢复。\n\n**注意**：\n- ~~Plan, Tool, Observe, Final~~ 不是源码术语。AgentLoop 实际是 Think → Act(tool_call) → Observe → 判断 final_answer\n- PLANNING 是 Harness 状态机的节点，不是 Loop 的一轮\n- 面试官如果追问「Plan 在 Loop 里怎么实现」会很尴尬"
+            },
+            {
+              "type": "question",
+              "category": "上下文与记忆",
+              "question": "第七个 bullet：上下文压缩与分层记忆怎么写？",
+              "answer": "**写法**：\n> diff 按风险优先级压缩 hunk，工具描述、记忆与 Observation 在 Token 预算内按优先级裁剪；Working/Episodic/Semantic 三层记忆按租户和仓库隔离，支持任务归档与过期清理。\n\n**关键细节**：\n- 「三层记忆」不是四层：`procedural` 在代码里声明了但从未被调用\n- 「短期/长期」对应：Working（短期，24h TTL）→ Episodic（长期，永久）+ Semantic（长期，永久）\n- 「风险优先级压缩」作用在 diff hunk 上，不是工具描述和 Observation\n\n**面试追问准备**：\n- consolidate_task() 做了什么？（归档摘要到 Episodic，然后 forget_working 清理 Working）\n- recall() 默认搜哪些 scope？（semantic + episodic，不搜 working）"
+            },
+            {
+              "type": "text",
+              "text": "**完整简历模板**\n\n```\nPRAudit：自进化 Agent Runtime Harness 的 PR 风险治理与安全修复智能体\n- 技术栈：Python、Self-Evolution、Dynamic Skill Sandbox、Multi-Agent Pipeline、Redis Streams、PostgreSQL、Docker、Prometheus\n- 构建可恢复的 Agent Runtime Harness，串联风险发现 → 证据复核 → 安全修复 → 结果验证的审查链路，以及自动评测 → 反馈学习 → 版本回滚的进化链路，实现研发风险治理的端到端闭环\n- 统一管理任务状态机、执行预算、节点重试、持久化 Checkpoint、任务取消、断点续跑及 Run Trace，保障长流程任务的可恢复性与容错能力\n- 自进化：将误报、漏报、坏修复及执行异常回流为失败案例，自动生成候选 Prompt 和声明式 Skill 版本，经安全性校验、Validation 提升和 Holdout 非退化门禁后自动激活，支持候选去重、历史版本追踪与一键回滚\n- 多 Agent 协作：根据变更范围与敏感路径生成任务计划，调度 Specialist 并行初审，通过 Critic 质疑、Reflection 修订、Evidence 独立复核、Verifier 验证和 Arbiter 裁决，完成 Finding 的证据校验、置信度校准、去重与排序\n- 端到端评测 Harness：基于 100 个受控 PR Diff（40 风险样本 + 60 干净样本）按仓库划分 Validation/Holdout，通过路径、行号区间和 CWE 类型进行一对一匹配，客观度量 Agent 能力迭代\n- Agent Loop 与可观测 Trace：基于 Think、Tool Call、Observe、Final Answer 构建 ReAct 执行循环，记录节点状态、Agent 消息、重试、Checkpoint 和门禁结果，支持执行链路回放、失败归因与断点恢复\n- 上下文压缩与分层记忆：diff 按风险优先级压缩 hunk，工具描述、记忆与 Observation 在 Token 预算内按优先级裁剪；Working/Episodic/Semantic 三层记忆按租户和仓库隔离，支持任务归档与过期清理\n```\n\n**每个 bullet 都对应源码可验证的实现**，面试官追问时可以直接引用文件路径和函数名。"
+            }
+          ]
+        }
+      ]
+    },
+    {
       "title": "一、Agent 架构与编排",
       "sections": [
         {
