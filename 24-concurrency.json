@@ -1,0 +1,199 @@
+{
+  "chapters": [
+    {
+      "id": "concurrency",
+      "title": "并发模型与 asyncio 对比",
+      "sections": [
+        {
+          "title": "背景知识：Python 并发的三条路",
+          "anchor": "concurrency-background",
+          "groupTitle": "并发模型",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 10,
+          "blocks": [
+            {
+              "type": "diagram",
+              "diagram": {
+                "language": "mermaid",
+                "content": "graph TB\n    subgraph 接入层[\"🌐 接入层\"]\n        A[HTTP API<br/>api.py] --> B[GitHub Webhook<br/>github.py]\n    end\n    subgraph 服务编排层[\"⚙️ 服务编排层\"]\n        C[ReviewService<br/>service.py]\n    end\n    subgraph 运行时层[\"🔄 运行时层\"]\n        D[ReviewHarness<br/>harness.py]\n        E[AgentRuntime<br/>runtime.py]\n        F[AgentLoop<br/>runtime.py]\n    end\n    subgraph 审查层[\"🔍 审查层\"]\n        G[MultiAgentCoordinator<br/>agents.py]\n        H[Reviewer 实现<br/>reviewer.py]\n        I[Skill Registry<br/>skills.py]\n    end\n    subgraph 持久化层[\"💾 持久化层\"]\n        J[TaskStore<br/>store.py / postgres_store.py]\n        K[TaskQueue<br/>task_queue.py]\n    end\n    subgraph 基础设施[\"🧠 基础设施\"]\n        L[ContextManager<br/>context_manager.py]\n        M[MemoryManager<br/>memory.py]\n        N[Observability<br/>observability.py]\n    end\n    A --> C\n    B --> C\n    C --> D\n    D --> E\n    E --> F\n    D --> G\n    G --> H\n    G --> I\n    C --> J\n    C --> K\n    G --> L\n    G --> M\n    D --> N\n    style A fill:#c2644a,stroke:#8b3a2a,color:#fff\n    style K fill:#c2644a,stroke:#8b3a2a,color:#fff",
+                "caption": "EvoAgent 系统架构 — 当前章节：并发设计（涉及 HTTP 层 + 任务队列）"
+              }
+            },
+            {
+              "type": "text",
+              "text": "> 📍 **当前位置**：本章讲解并发设计。并发点主要出现在接入层（HTTP 请求处理）和持久化层（任务队列执行）。"
+            },
+            {
+              "type": "text",
+              "text": "Python 后端并发有三条主流路径：\n\n| 模型 | 代表 | 并发单位 | 适合场景 |\n|------|------|----------|----------|\n| **多线程** (threading) | Flask + Gunicorn, Django + mod_wsgi | OS 线程 | I/O 密集 + 需同步库（数据库驱动） |\n| **协程** (asyncio) | FastAPI + Uvicorn, aiohttp | 用户态协程 | 高并发 I/O（WebSocket, 爬虫, 长连接） |\n| **多进程** (multiprocessing) | Celery, Dask | OS 进程 | CPU 密集（数据处理, 图像计算） |\n\n**EvoAgent 选择了多线程**，原因：\n\n1. **标准库驱动**：项目目标是用纯标准库实现，`threading` 和 `http.server.ThreadingHTTPServer` 都在标准库中，`asyncio` 虽然也在标准库但生态（aiohttp, httpx, asyncpg）全部是第三方\n2. **同步 API**：`urllib.request`（标准库 HTTP 客户端）是同步的，如果要用 asyncio 必须换成 `httpx` 或 `aiohttp`\n3. **复杂度可控**：审查请求的并发量不高（一个 PR 一次审查），不需要上千并发连接\n4. **GIL 不是瓶颈**：审查是 I/O 密集型（LLM API 调用、数据库读写），GIL 不影响实际性能\n\n但面试中 asyncio 是高频考点——接下来会详细对比两种方案。"
+            }
+          ]
+        },
+        {
+          "title": "当前并发模型：四个并发点",
+          "anchor": "concurrency-current",
+          "groupTitle": "并发模型",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 15,
+          "blocks": [
+            {
+              "type": "diagram",
+              "diagram": {
+                "language": "mermaid",
+                "content": "graph LR\n    subgraph \"并发点 1: HTTP 接入\"\n        H1[请求A] -->|线程1| TS[ThreadingHTTPServer]\n        H2[请求B] -->|线程2| TS\n        H3[请求C] -->|线程3| TS\n    end\n    subgraph \"并发点 2: 任务队列\"\n        TQ[TaskQueue] -->|worker1| W1[_deliver]\n        TQ -->|worker2| W2[_deliver]\n        TQ -->|workerN| WN[_deliver]\n    end\n    subgraph \"并发点 3: 线程安全\"\n        L1[\"Lock(store)\"] -.->|保护| DB[(共享存储)]\n        L2[\"Lock(metrics)\"] -.->|保护| M[计数器]\n    end\n    subgraph \"并发点 4: 请求隔离\"\n        TL[\"threading.local()\"] -.->|隔离| CTX[trace_id / 上下文]\n    end",
+                "caption": "EvoAgent 的四个并发点"
+              }
+            },
+            {
+              "type": "text",
+              "text": "项目中有 **四个并发设计点**，每个解决不同问题："
+            },
+            {
+              "type": "text",
+              "text": "### 并发点 1：HTTP 接入 — `ThreadingHTTPServer`\n\n`api.py` 使用标准库的 `ThreadingHTTPServer`，每个 HTTP 请求分配一个线程：\n\n```python\n# evoagent/api.py:536\nserver = ThreadingHTTPServer((settings.host, settings.port), handler)\nserver.serve_forever()\n```\n\n**工作原理**：收到请求 → 创建新线程 → 调用 `handler.do_GET/do_POST` → 处理完线程销毁。最多同时处理 `sys.getrecursionlimit()` 个请求（实际受 GIL 和线程开销限制，通常 50-100 个）。\n\n**对比 asyncio 方案**：\n```python\n# FastAPI 等价写法（异步）\nfrom fastapi import FastAPI\nimport uvicorn\n\napp = FastAPI()\n\n@app.post(\"/v1/reviews\")\nasync def create_review(body: dict):\n    return service.submit(body)\n\nuvicorn.run(app, host=\"0.0.0.0\", port=8080)\n```\n\n| 对比 | ThreadingHTTPServer | FastAPI + Uvicorn |\n|------|---------------------|-------------------|\n| 并发模型 | 每请求一线程 | 单线程 + 事件循环 |\n| 最大并发 | ~100（线程开销） | ~10000（协程几乎无开销） |\n| 阻塞影响 | 一个线程阻塞不影响其他 | 一个 `await` 阻塞会卡住整个事件循环 |\n| 代码复杂度 | 同步，直觉式 | 需要 `async/await` 传播 |\n| 标准库 | ✅ 零依赖 | ❌ 需要 fastapi + uvicorn |"
+            },
+            {
+              "type": "text",
+              "text": "### 并发点 2：任务队列 — `ThreadPoolExecutor`\n\n`task_queue.py` 是项目中最复杂的并发组件，使用线程池执行审查任务：\n\n```python\n# evoagent/task_queue.py:31\nself._executor = ThreadPoolExecutor(\n    max_workers=workers,           # 默认 2 个 worker\n    thread_name_prefix=\"evoagent-worker\"\n)\n\n# 提交任务\nself._executor.submit(self._deliver, envelope)\n```\n\n**为什么不用 asyncio 的 `TaskGroup`？**\n\n```python\n# asyncio 等价写法\nimport asyncio\n\nclass AsyncTaskQueue:\n    def __init__(self, handler, workers=2):\n        self.handler = handler\n        self._semaphore = asyncio.Semaphore(workers)  # 控制并发\n        self._stop = asyncio.Event()\n\n    async def submit(self, payload):\n        asyncio.create_task(self._deliver(payload))\n\n    async def _deliver(self, payload):\n        async with self._semaphore:\n            try:\n                await self.handler(payload)  # handler 必须是 async\n            except Exception:\n                # 重试逻辑...\n                pass\n```\n\n**关键区别**：asyncio 版本要求 `handler` 也必须是 async。但 EvoAgent 的 `handler` 内部调用了 `urllib.request`（同步 HTTP 客户端）、`sqlite3`（同步数据库），整个调用链都是同步的。如果要用 asyncio，必须把整条链都改成异步——改动面巨大。"
+            },
+            {
+              "type": "text",
+              "text": "### 并发点 3：线程安全 — `Lock` 与 `RLock`\n\n项目中有 **7 个模块** 使用了锁：\n\n| 模块 | 锁类型 | 保护对象 |\n|------|--------|----------|\n| `metrics.py` | `Lock` | 计数器 `counters` |\n| `store.py` | `Lock` | 内存存储 `_tasks` |\n| `skills.py` | `RLock` | Skill 注册表 `_registry` |\n| `evolution.py` | `RLock` | 候选 prompt 列表 |\n| `skill_evolution.py` | `RLock` | Skill 版本列表 |\n| `github.py` | `Lock` | Webhook 状态 |\n| `task_queue.py` | `Lock` | 死信队列 `_memory_dlq` |\n\n**Lock vs RLock 的区别**：\n```python\nimport threading\n\n# Lock（互斥锁）：同一个线程也不能重复获取\nlock = threading.Lock()\nlock.acquire()\nlock.acquire()  # ❌ 死锁！自己卡住自己\n\n# RLock（可重入锁）：同一线程可以多次获取\nrlock = threading.RLock()\nrlock.acquire()\nrlock.acquire()  # ✅ 正常，引用计数 +1\nrlock.release()  # 引用计数 -1\nrlock.release()  # 完全释放\n```\n\n项目用 `RLock` 的场景是**方法调用方法**——外层方法获取锁后调用内层方法，内层方法也需要锁：\n\n```python\n# skills.py — 为什么用 RLock\nclass SkillRegistry:\n    def __init__(self):\n        self._lock = threading.RLock()  # 可重入\n\n    def register(self, skill):          # 外层\n        with self._lock:\n            self._validate(skill)\n            self._registry[skill.name] = skill\n\n    def _validate(self, skill):         # 内层也需要锁\n        with self._lock:                # RLock: 同一线程可重入 ✅\n            # 验证逻辑\n            pass\n```\n\n如果用 `Lock` 则会在 `_validate` 中死锁。"
+            },
+            {
+              "type": "text",
+              "text": "### 并发点 4：请求隔离 — `threading.local()`\n\n`harness.py` 使用 `threading.local()` 存储请求级上下文，避免不同请求之间互相干扰：\n\n```python\n# evoagent/harness.py:51\nclass ReviewHarness:\n    def __init__(self, ...):\n        self._ctx = threading.local()  # 每个线程独立的命名空间\n\n    def run(self, task_id, ...):\n        self._ctx.task_id = task_id     # 线程 A 设置自己的 task_id\n        self._ctx.trace_id = ...        # 线程 B 设置自己的 trace_id\n        # 互不干扰\n```\n\n**对比 asyncio 的 `contextvars`**：\n\n```python\n# asyncio 等价方案\nfrom contextvars import ContextVar\n\ntask_id_var: ContextVar[str] = ContextVar(\"task_id\", default=\"\")\n\nasync def run(task_id):\n    token = task_id_var.set(task_id)  # 当前协程设置\n    try:\n        # 同一协程内的所有 await 都能看到\n        await do_work()\n    finally:\n        task_id_var.reset(token)       # 恢复\n```\n\n| 对比 | threading.local() | contextvars.ContextVar |\n|------|-------------------|----------------------|\n| 隔离粒度 | 线程 | 协程/任务 |\n| 在 asyncio 中可用 | ❌ 协程共享线程 | ✅ |\n| 在 threading 中可用 | ✅ | ✅（也支持） |\n| API 风格 | 属性访问 `ctx.task_id` | 显式 `var.get()/set()` |\n\n值得注意的是，`observability.py` 中的 `trace_id_var` 已经使用了 `ContextVar`——这意味着即使在多线程环境中，它也使用了更现代的隔离方式。"
+            }
+          ]
+        },
+        {
+          "title": "面试高频：asyncio 核心概念速查",
+          "anchor": "concurrency-asyncio-interview",
+          "groupTitle": "并发模型",
+          "difficulty": "advanced",
+          "estimatedMinutes": 15,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "即使项目没用 asyncio，面试中 **asyncio 是必考题**。以下是核心概念和常见面试问题的速查。"
+            },
+            {
+              "type": "text",
+              "text": "### 概念 1：协程 vs 线程 vs 进程\n\n```\n┌─────────────────────────────────────────────────┐\n│  进程 (Process)                                  │\n│  ┌─────────────────────────────────────────────┐ │\n│  │  线程 (Thread)                               │ │\n│  │  ┌───────┐ ┌───────┐ ┌───────┐ ┌───────┐  │ │\n│  │  │协程 A │ │协程 B │ │协程 C │ │协程 D │  │ │\n│  │  └───────┘ └───────┘ └───────┘ └───────┘  │ │\n│  │  ← 一个线程内可以运行多个协程 →              │ │\n│  └─────────────────────────────────────────────┘ │\n│  ← 一个进程内可以有多个线程 →                    │\n└─────────────────────────────────────────────────┘\n```\n\n| 特性 | 协程 (asyncio) | 线程 (threading) | 进程 (multiprocessing) |\n|------|---------------|-----------------|----------------------|\n| 调度方式 | 用户态，协作式 | 内核态，抢占式 | 内核态，独立 |\n| 切换开销 | ~100ns | ~1μs | ~10μs |\n| 内存 | 共享堆 | 共享堆 | 独立（COW） |\n| GIL 影响 | 单线程，无竞争 | 有 GIL | 每个进程独立 GIL |\n| 适合 | 高并发 I/O | 通用 I/O | CPU 密集 |"
+            },
+            {
+              "type": "text",
+              "text": "### 概念 2：async/await 的本质\n\n```python\n# async 函数 = 协程工厂\nasync def fetch_review(diff: str) -> dict:       # 调用返回协程对象\n    response = await httpx.get(...)              # 暂停，让出控制权\n    return response.json()                       # 恢复后继续\n\n# 三种调用方式\ncoro = fetch_review(\"diff content\")              # 创建协程（不执行）\nresult = await fetch_review(\"diff content\")      # 在 async 上下文中等待\nresult = asyncio.run(fetch_review(\"diff\"))       # 从同步代码启动\n```\n\n**面试陷阱**：`await` 不是\"等待函数返回\"，而是\"暂停当前协程，让事件循环去执行别的协程，等 I/O 完成后恢复\"。如果在 `await` 之间做了同步阻塞调用（如 `time.sleep()`），整个事件循环被卡住。\n\n```python\n# ❌ 错误：在 async 函数中同步阻塞\nasync def bad_handler():\n    time.sleep(5)          # 卡住整个事件循环！所有协程都停\n    return await fetch()\n\n# ✅ 正确：用异步替代\nasync def good_handler():\n    await asyncio.sleep(5) # 让出控制权，其他协程继续运行\n    return await fetch()\n```"
+            },
+            {
+              "type": "text",
+              "text": "### 概念 3：并发控制原语\n\n| 原语 | asyncio 版 | threading 版 | 用途 |\n|------|-----------|-------------|------|\n| 互斥锁 | `asyncio.Lock()` | `threading.Lock()` | 保护共享资源 |\n| 信号量 | `asyncio.Semaphore(n)` | `threading.Semaphore(n)` | 限制并发数 |\n| 事件 | `asyncio.Event()` | `threading.Event()` | 通知等待 |\n| 条件变量 | `asyncio.Condition()` | `threading.Condition()` | 条件等待 |\n| 队列 | `asyncio.Queue()` | `queue.Queue()` | 生产者-消费者 |\n\n**asyncio 独有的**：\n```python\n# gather — 并发执行多个协程\nresults = await asyncio.gather(\n    review_security(diff),\n    review_reliability(diff),\n    review_performance(diff),\n)\n\n# TaskGroup (Python 3.11+) — 结构化并发\nasync with asyncio.TaskGroup() as tg:\n    t1 = tg.create_task(review_security(diff))\n    t2 = tg.create_task(review_reliability(diff))\n# 自动等待所有任务完成，异常时自动取消其他任务\n```\n\n**面试高频追问**：`gather` vs `TaskGroup`？\n- `gather`：所有任务独立运行，一个失败不影响其他（除非传 `return_exceptions=False`）\n- `TaskGroup`：结构化，一个任务异常会取消组内其他任务，更安全"
+            },
+            {
+              "type": "text",
+              "text": "### 概念 4：GIL（全局解释器锁）\n\n**面试经典题**：\"Python 有 GIL，多线程还有意义吗？\"\n\n**答案框架**：\n\n```\nGIL 保证同一时刻只有一个线程执行 Python 字节码\n但以下操作会释放 GIL：\n├── I/O 操作（文件读写、网络请求、sleep）\n├── C 扩展（NumPy、正则引擎）\n└── 显式释放（C 层面）\n\n所以：\n├── CPU 密集 → GIL 是瓶颈 → 用多进程\n├── I/O 密集 → GIL 不影响 → 多线程/asyncio 都行\n└── EvoAgent 审查 → I/O 密集（LLM API 调用）→ 多线程有效\n```\n\n**EvoAgent 场景**：一次审查的耗时分布大约是：\n- LLM API 调用：~80%（释放 GIL，其他线程可运行）\n- 数据库读写：~15%（释放 GIL）\n- 纯 Python 计算：~5%（受 GIL 影响，但占比极小）\n\n结论：GIL 对 EvoAgent 几乎没有影响。"
+            }
+          ]
+        },
+        {
+          "title": "如果迁移到 asyncio：需要改什么",
+          "anchor": "concurrency-migration",
+          "groupTitle": "并发模型",
+          "difficulty": "advanced",
+          "estimatedMinutes": 20,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "假设要把 EvoAgent 从多线程迁移到 asyncio，需要改动 **5 个核心模块**。下面逐一展示改造对照。"
+            },
+            {
+              "type": "text",
+              "text": "### 改造 1：HTTP 层 — `ThreadingHTTPServer` → `FastAPI`\n\n这是改动最大的部分，也是收益最大的——从每请求一线程变为事件循环。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# === 当前实现 (threading) ===\n# api.py:536\nfrom http.server import BaseHTTPRequestHandler, ThreadingHTTPServer\n\nclass ApiHandler(BaseHTTPRequestHandler):\n    def do_POST(self):\n        if self.path == \"/v1/reviews\":\n            body = json.loads(self.rfile.read(content_length))\n            task_id = self.service.submit(body)  # 同步阻塞\n            self._send_json(202, {\"task_id\": task_id})\n\nserver = ThreadingHTTPServer((host, port), handler)\n\n# === asyncio 版本 ===\n# api.py\nfrom fastapi import FastAPI\nfrom pydantic import BaseModel\nimport uvicorn\n\napp = FastAPI()\n\nclass ReviewRequest(BaseModel):\n    diff: str\n    repository: str\n\n@app.post(\"/v1/reviews\", status_code=202)\nasync def create_review(req: ReviewRequest):\n    task_id = await asyncio.to_thread(     # ① 同步代码扔进线程池\n        service.submit, req.model_dump()\n    )\n    return {\"task_id\": task_id}\n\nuvicorn.run(app, host=host, port=port)",
+                "caption": "HTTP 层迁移：ThreadingHTTPServer → FastAPI"
+              }
+            },
+            {
+              "type": "text",
+              "text": "**① `asyncio.to_thread()`**：把同步的 `service.submit()` 扔进默认线程池执行，不阻塞事件循环。这是**渐进式迁移**的关键——不需要把所有代码都改成 async，先把 HTTP 层换掉，业务逻辑暂不动。\n\n**更彻底的方案**是把 `service.submit()` 也改成 async，但这意味着整条调用链都要改。"
+            },
+            {
+              "type": "text",
+              "text": "### 改造 2：LLM 调用 — `urllib.request` → `httpx`\n\n审查引擎中的 LLM 调用是最大的 I/O 瓶颈，也是最需要异步化的地方。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# === 当前实现 (urllib.request, 同步) ===\n# reviewer.py — OpenAICompatibleReviewer._call_model()\ndef _call_model(self, messages, tools=None):\n    data = json.dumps({\n        \"model\": self.model, \"messages\": messages, \"tools\": tools,\n    }).encode()\n    request = urllib.request.Request(            # 同步 HTTP\n        url, data=data, headers=headers, method=\"POST\",\n    )\n    with urllib.request.urlopen(request) as response:\n        return json.loads(response.read())\n\n# === asyncio 版本 ===\nimport httpx\n\nclass AsyncOpenAIReviewer(Reviewer):\n    def __init__(self, ...):\n        self._client = httpx.AsyncClient(         # ① 异步 HTTP 客户端\n            base_url=url,\n            headers=headers,\n            timeout=60.0,\n        )\n\n    async def _call_model(self, messages, tools=None):\n        response = await self._client.post(       # ② await 非阻塞\n            \"/chat/completions\",\n            json={\"model\": self.model, \"messages\": messages, \"tools\": tools},\n        )\n        return response.json()\n\n    async def review(self, diff, parsed):         # ③ review 也变 async\n        findings = []\n        # agent_loop 中的每一步都 await\n        result = await self._call_model(messages, tools)\n        # ...\n        return findings",
+                "caption": "LLM 调用迁移：urllib → httpx"
+              }
+            },
+            {
+              "type": "text",
+              "text": "### 改造 3：任务队列 — `ThreadPoolExecutor` → `asyncio.TaskGroup`\n\n这是最优雅的改造——`TaskGroup` 天然适合\"提交-执行-重试\"模型。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# === 当前实现 (ThreadPoolExecutor) ===\nclass TaskQueue:\n    def __init__(self, handler, workers=2):\n        self._executor = ThreadPoolExecutor(max_workers=workers)\n\n    def submit(self, payload):\n        self._executor.submit(self._deliver, envelope)\n\n    def _deliver(self, envelope):\n        self.handler(envelope[\"payload\"])  # 同步 handler\n\n# === asyncio 版本 ===\nimport asyncio\n\nclass AsyncTaskQueue:\n    def __init__(self, handler, workers=2):\n        self.handler = handler                    # async handler\n        self._semaphore = asyncio.Semaphore(workers)\n        self._tasks: set[asyncio.Task] = set()\n\n    async def submit(self, payload):\n        task = asyncio.create_task(self._deliver(payload))\n        self._tasks.add(task)\n        task.add_done_callback(self._tasks.discard)\n\n    async def _deliver(self, envelope):\n        async with self._semaphore:               # ① 控制并发数\n            try:\n                await self.handler(envelope[\"payload\"])  # ② 异步 handler\n            except PermanentTaskError as exc:\n                await self._dead_letter(envelope, str(exc))\n            except Exception as exc:\n                if envelope[\"attempt\"] >= self.max_attempts:\n                    await self._dead_letter(envelope, str(exc))\n                else:\n                    delay = min(2 ** envelope[\"attempt\"], 10)\n                    await asyncio.sleep(delay)     # ③ 异步等待，不阻塞\n                    envelope[\"attempt\"] += 1\n                    await self.submit(envelope[\"payload\"])\n\n    async def close(self):\n        await asyncio.gather(*self._tasks, return_exceptions=True)",
+                "caption": "任务队列迁移：ThreadPoolExecutor → asyncio.Semaphore + Task"
+              }
+            },
+            {
+              "type": "text",
+              "text": "**① Semaphore vs ThreadPoolExecutor**：\n\n| 对比 | `ThreadPoolExecutor(max_workers=2)` | `asyncio.Semaphore(2)` |\n|------|-------------------------------------|----------------------|\n| 并发控制 | 最多 2 个线程同时执行 | 最多 2 个协程同时执行 |\n| 资源开销 | 2 个 OS 线程（~16MB 栈） | 2 个协程（~几 KB） |\n| 任务排队 | 内部队列 | 协程等待 semaphore |\n| 取消 | `executor.shutdown()` | `task.cancel()` |\n\n### 改造 4：数据库 — `sqlite3` → `aiosqlite`\n\n```python\n# 当前：sqlite3 (同步)\nimport sqlite3\nconn = sqlite3.connect(\"evoagent.db\")\nconn.execute(\"INSERT INTO tasks ...\")\n\n# asyncio 版本：aiosqlite\nimport aiosqlite\nconn = await aiosqlite.connect(\"evoagent.db\")\nawait conn.execute(\"INSERT INTO tasks ...\")\n\n# 或者 PostgreSQL：asyncpg\nimport asyncpg\npool = await asyncpg.create_pool(\"postgresql://...\")\nasync with pool.acquire() as conn:\n    await conn.execute(\"INSERT INTO tasks ...\")\n```\n\n### 改造 5：Redis — `redis` → `aioredis`\n\n```python\n# 当前：redis (同步)\nimport redis\nr = redis.Redis.from_url(\"redis://localhost\")\nr.xadd(\"stream\", {\"envelope\": json.dumps(envelope)})\n\n# asyncio 版本：redis.asyncio\nfrom redis.asyncio import Redis\nr = Redis.from_url(\"redis://localhost\")\nawait r.xadd(\"stream\", {\"envelope\": json.dumps(envelope)})\n```\n\n**改造总结**：\n\n| 改造 | 当前 | asyncio | 影响范围 | 难度 |\n|------|------|---------|----------|------|\n| HTTP 层 | `ThreadingHTTPServer` | `FastAPI + Uvicorn` | api.py 全文件 | 中 |\n| LLM 调用 | `urllib.request` | `httpx.AsyncClient` | reviewer.py + agents.py | 高 |\n| 任务队列 | `ThreadPoolExecutor` | `asyncio.Semaphore` | task_queue.py | 中 |\n| 数据库 | `sqlite3` / `psycopg` | `aiosqlite` / `asyncpg` | store.py + postgres_store.py | 低 |\n| Redis | `redis` | `redis.asyncio` | task_queue.py (Redis 模式) | 低 |\n| 上下文 | `threading.local()` | `contextvars.ContextVar` | harness.py | 低 |"
+            }
+          ]
+        },
+        {
+          "title": "渐进式迁移策略：`asyncio.to_thread` 过渡",
+          "anchor": "concurrency-gradual",
+          "groupTitle": "并发模型",
+          "difficulty": "advanced",
+          "estimatedMinutes": 12,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "全量迁移到 asyncio 改动巨大。更务实的策略是**渐进式迁移**——先用 `asyncio.to_thread()` 包装同步代码，逐步替换。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# 渐进式迁移方案：混合架构\nfrom fastapi import FastAPI\nimport asyncio\n\napp = FastAPI()\n\n# Phase 1: HTTP 层用 FastAPI，业务逻辑保持同步\n@app.post(\"/v1/reviews\")\nasync def create_review(body: dict):\n    # asyncio.to_thread 把同步代码扔进默认线程池\n    # 不阻塞事件循环，其他请求可以继续处理\n    task_id = await asyncio.to_thread(service.submit, body)\n    return {\"task_id\": task_id}\n\n@app.get(\"/api/dashboard\")\nasync def dashboard():\n    stats = await asyncio.to_thread(service.store.dashboard_stats, \"default\")\n    return stats\n\n# Phase 2: 关键路径逐步异步化\n# 先改 LLM 调用（最大 I/O 瓶颈）\n@app.post(\"/v1/reviews\")\nasync def create_review_v2(body: dict):\n    parsed = parse_unified_diff(body[\"diff\"])           # 纯 CPU，无需 async\n    findings = await async_reviewer.review(body[\"diff\"], parsed)  # 已异步\n    report = await asyncio.to_thread(                    # 其他仍同步\n        service.store.save_report, body[\"task_id\"], findings\n    )\n    return report",
+                "caption": "渐进式迁移：Phase 1 全包装 → Phase 2 关键路径异步化"
+              }
+            },
+            {
+              "type": "text",
+              "text": "**`asyncio.to_thread()` 的本质**：\n\n```python\n# Python 3.9+ 标准库\nasync def to_thread(func, /, *args, **kwargs):\n    loop = asyncio.get_running_loop()\n    return await loop.run_in_executor(None, func, *args, **kwargs)\n\n# 等价于：\n# 1. 从默认 ThreadPoolExecutor 取一个线程\n# 2. 在线程中执行 func(*args, **kwargs)\n# 3. await 等待结果（事件循环不阻塞）\n```\n\n这意味着即使不改动业务代码，只要 HTTP 层换成 asyncio，并发能力就能从 ~100 提升到 ~10000。代价是每个请求多一次线程切换（~1μs）。"
+            },
+            {
+              "type": "table",
+              "table": {
+                "headers": ["阶段", "改动", "并发能力", "代码改动量"],
+                "rows": [
+                  ["Phase 0 (当前)", "ThreadingHTTPServer", "~100", "0 行"],
+                  ["Phase 1", "FastAPI + asyncio.to_thread", "~10000", "api.py ~200 行"],
+                  ["Phase 2", "LLM 调用异步化 (httpx)", "~10000 (延迟降低)", "reviewer.py ~50 行"],
+                  ["Phase 3", "全链路异步", "~50000", "~800 行"]
+                ]
+              }
+            },
+            {
+              "type": "text",
+              "text": "---\n\n**并发模型的选择本质是工程权衡。** EvoAgent 选择了\"够用就好\"的多线程方案——标准库、零依赖、代码直觉。但如果需要扩展到大规模并发（如同时处理数千个 PR），Phase 1 的 `asyncio.to_thread` 包装是成本最低的升级路径。\n\n下一章面试准备中有更多并发相关的面试题，详见 20-interview 教程。"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

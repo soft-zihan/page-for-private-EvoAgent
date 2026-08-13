@@ -23,7 +23,8 @@
     "20-interview.json",
     "21-tech-stack.json",
     "22-agent-frameworks.json",
-    "23-observability.json"
+    "23-observability.json",
+    "24-concurrency.json"
   ],
   "groups": [
     {
@@ -38,8 +39,8 @@
     },
     {
       "title": "基础设施层",
-      "description": "持久化、认证与队列、上下文与记忆、观测与监控",
-      "files": ["10-persistence.json", "11-auth-queue.json", "12-context-memory.json", "23-observability.json"]
+      "description": "持久化、认证与队列、上下文与记忆、观测与监控、并发模型",
+      "files": ["10-persistence.json", "11-auth-queue.json", "12-context-memory.json", "23-observability.json", "24-concurrency.json"]
     },
     {
       "title": "高级功能",
