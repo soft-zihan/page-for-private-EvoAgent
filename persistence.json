@@ -5,6 +5,23 @@
       "title": "持久化",
       "sections": [
         {
+          "title": "前置知识：SQLite、PostgreSQL 和 Redis",
+          "anchor": "background-storage",
+          "groupTitle": "项目背景与核心概念",
+          "difficulty": "beginner",
+          "estimatedMinutes": 5,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "SQLite 是单文件数据库，适合本地运行和测试。EvoAgent 默认把数据写到 evoagent.db。PostgreSQL 适合多进程或多实例共享数据。设置 EVOAGENT_DATABASE_URL 后，服务会选择 PostgresTaskStore。Redis 在这里不是数据库主存储，而是异步任务队列适配。Worker 用 **BRPOP** 等待任务——BRPOP 是 Redis 的阻塞式列表弹出命令，Worker 用它从队列中等待并获取任务，就像顾客在窗口排队等待叫号。"
+            },
+            {
+              "type": "text",
+              "text": "项目启动时创建多张数据库表：tasks（任务主表）、trace_events（执行轨迹）、failure_cases（反馈案例）、skill_versions（提示词版本）、evaluation_cases（评测数据集）、evolution_runs（进化记录）、installations（GitHub 安装）。SQLite 使用 JSON 文本字段和 threading.Lock，PostgreSQL 使用 **JSONB** 和 **advisory lock**。JSONB 是 PostgreSQL 的二进制 JSON 存储格式，查询速度比普通 JSON 文本快得多，就像把书做成电子书后检索更快。advisory lock 是 PostgreSQL 的应用级锁机制，用于协调多个进程的并发操作——就像会议室的门锁，谁先拿到钥匙谁先用。这些概念在 09-持久化教程中有详细解释。"
+            }
+          ]
+        },
+        {
           "title": "背景知识：双模持久化架构",
           "anchor": "practice-persistence-background",
           "groupTitle": "持久化存储模块",

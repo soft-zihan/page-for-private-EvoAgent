@@ -5,6 +5,66 @@
       "title": "评测系统",
       "sections": [
         {
+          "title": "前置知识：Precision、Recall 和 F1",
+          "anchor": "background-metrics",
+          "groupTitle": "项目背景与核心概念",
+          "difficulty": "beginner",
+          "estimatedMinutes": 8,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "评测不能只看「模型说得像不像」。EvoAgent 使用位置级的客观指标。Precision = TP / (TP + FP)，Recall = TP / (TP + FN)，F1 = 2 * Precision * Recall / (Precision + Recall)。TP 是正确命中的问题，FP 是误报，FN 是漏报。"
+            },
+            {
+              "type": "text",
+              "text": "只看 Recall 容易鼓励模型多报问题，只看 Precision 又可能让模型过于保守。F1 用来平衡两者。Validation 用来判断候选提示词是否比基线更好。Holdout 是隐藏回归集，用来检查候选有没有针对公开验证样本过拟合。项目的激活逻辑不是「validation 分数高就上线」，候选还要保证 holdout 上的受保护指标不超过允许退化值。"
+            },
+            {
+              "type": "table",
+              "table": {
+                "headers": [
+                  "门禁",
+                  "默认条件"
+                ],
+                "rows": [
+                  [
+                    "Validation F1 改善",
+                    "至少提高 0.02"
+                  ],
+                  [
+                    "High risk recall",
+                    "不低于 baseline"
+                  ],
+                  [
+                    "Clean accuracy",
+                    "不低于 baseline"
+                  ],
+                  [
+                    "Holdout F1",
+                    "不低于 baseline"
+                  ],
+                  [
+                    "Execution success",
+                    "至少 0.98"
+                  ],
+                  [
+                    "Safe fix rate",
+                    "至少 0.75"
+                  ],
+                  [
+                    "E2E security fix rate",
+                    "至少 0.60"
+                  ],
+                  [
+                    "Production data provenance",
+                    "source kind 必须是 public-github-pr"
+                  ]
+                ]
+              }
+            }
+          ]
+        },
+        {
           "title": "背景知识：评测系统的两个层次",
           "anchor": "practice-eval-background",
           "groupTitle": "评测系统模块",
@@ -113,7 +173,7 @@
           "blocks": [
             {
               "type": "text",
-              "text": "在 07-运行时 中你已了解 ReviewHarness 负责线上审查流程。这里介绍的是另一套完全独立的评测 Harness（EndToEndEvaluationHarness），专门用于离线评测。项目里有两套名称相近的实现：(1) evoagent/harness.py 中的 ReviewHarness，负责执行一轮真实的 PR 代码审查；(2) evoagent/evaluation_harness.py 中的 EndToEndEvaluationHarness，负责离线评测审查器、验证自动修复，并执行发布门禁。它们解决的是两个不同问题。"
+              "text": "在 runtime 中你已了解 ReviewHarness 负责线上审查流程。这里介绍的是另一套完全独立的评测 Harness（EndToEndEvaluationHarness），专门用于离线评测。项目里有两套名称相近的实现：(1) evoagent/harness.py 中的 ReviewHarness，负责执行一轮真实的 PR 代码审查；(2) evoagent/evaluation_harness.py 中的 EndToEndEvaluationHarness，负责离线评测审查器、验证自动修复，并执行发布门禁。它们解决的是两个不同问题。"
             },
             {
               "type": "table",

@@ -165,7 +165,7 @@
           "blocks": [
             {
               "type": "text",
-              "text": "持久化是指将数据保存到磁盘（数据库）的过程。EvoAgent 实现了**双模持久化**：开发环境用 SQLite（零配置），生产环境用 PostgreSQL（高可靠），两者共享同一套接口（`store.py` 中定义的抽象基类）。\n\n> **代码详解**：双模持久化的完整代码实现（TaskStore 抽象基类、SQLiteTaskStore、PostgresTaskStore）已在 [09-持久化](./tutorial/index.html?chapter=persistence) 教程中详细讲解。这里只总结选型决策。"
+              "text": "持久化是指将数据保存到磁盘（数据库）的过程。EvoAgent 实现了**双模持久化**：开发环境用 SQLite（零配置），生产环境用 PostgreSQL（高可靠），两者共享同一套接口（`store.py` 中定义的抽象基类）。\n\n> **代码详解**：双模持久化的完整代码实现（TaskStore 抽象基类、SQLiteTaskStore、PostgresTaskStore）已在 [persistence](./tutorial/index.html?chapter=persistence) 教程中详细讲解。这里只总结选型决策。"
             },
             {
               "type": "text",

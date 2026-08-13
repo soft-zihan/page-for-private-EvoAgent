@@ -243,7 +243,7 @@
             },
             {
               "type": "text",
-              "text": "---\n\n**观测层让 Agent 行为透明。** 但评测系统如何量化审查质量？详见 18-evaluation 教程——它讲解了 `EndToEndEvaluationHarness` 如何用 precision/recall/F1 评估审查准确性，以及 `comparison_summary` 如何设置发布门禁。"
+              "text": "---\n\n**观测层让 Agent 行为透明。** 但评测系统如何量化审查质量？详见 evaluation 教程——它讲解了 `EndToEndEvaluationHarness` 如何用 precision/recall/F1 评估审查准确性，以及 `comparison_summary` 如何设置发布门禁。"
             }
           ]
         }

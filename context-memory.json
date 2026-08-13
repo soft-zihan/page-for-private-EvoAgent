@@ -225,7 +225,7 @@
           "blocks": [
             {
               "type": "text",
-              "text": "上下文与记忆模块的设计原则：(1) 预算硬限制——ContextManager 保证上下文永远不超过 max_tokens，超出时按风险评分裁剪；(2) 风险优先——安全评分高的 hunk 不会被压缩掉；(3) 分层存储——Working 短期、Episodic 中期、Semantic 长期，各有不同的 TTL 和检索策略；(4) 任务归档——任务完成后自动将摘要归档为 Episodic Memory，释放 Working Memory，避免内存泄漏。→ 延伸阅读：ContextManager 在 MultiAgentCoordinator 中的使用详见 08-多Agent 教程；记忆检索如何影响 LLM Agent 的审查行为详见 06-审查引擎教程。"
+              "text": "上下文与记忆模块的设计原则：(1) 预算硬限制——ContextManager 保证上下文永远不超过 max_tokens，超出时按风险评分裁剪；(2) 风险优先——安全评分高的 hunk 不会被压缩掉；(3) 分层存储——Working 短期、Episodic 中期、Semantic 长期，各有不同的 TTL 和检索策略；(4) 任务归档——任务完成后自动将摘要归档为 Episodic Memory，释放 Working Memory，避免内存泄漏。→ 延伸阅读：ContextManager 在 MultiAgentCoordinator 中的使用详见 multi-agent 教程；记忆检索如何影响 LLM Agent 的审查行为详见 06-审查引擎教程。"
             },
             {
               "type": "text",

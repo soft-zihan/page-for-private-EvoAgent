@@ -208,7 +208,7 @@
             },
             {
               "type": "text",
-              "text": "注意「deferred 任务」的设计：Webhook 到达时并不立即下载 diff，而是只保存 diff_url。真正的 diff 下载发生在 Worker 消费时。这样做的好处是：(1) Webhook 响应极快（<100ms），不会因 GitHub API 延迟阻塞；(2) diff 下载失败可以独立重试；(3) Worker 可以根据 installation_id 选择正确的 GitHub 凭证。\n\n注意上面提到的两个关键概念：(1) **HMAC-SHA256 签名**——确保请求确实来自 GitHub（详见 02-背景知识教程和 14-GitHub 集成教程）；(2) **幂等性**——同一个 PR 的 Webhook 可能因为网络重试被发送多次，claim_webhook 的幂等去重确保系统不会重复创建审查任务。"
+              "text": "注意「deferred 任务」的设计：Webhook 到达时并不立即下载 diff，而是只保存 diff_url。真正的 diff 下载发生在 Worker 消费时。这样做的好处是：(1) Webhook 响应极快（<100ms），不会因 GitHub API 延迟阻塞；(2) diff 下载失败可以独立重试；(3) Worker 可以根据 installation_id 选择正确的 GitHub 凭证。\n\n注意上面提到的两个关键概念：(1) **HMAC-SHA256 签名**——确保请求确实来自 GitHub（详见 02-背景知识教程和 github 集成教程）；(2) **幂等性**——同一个 PR 的 Webhook 可能因为网络重试被发送多次，claim_webhook 的幂等去重确保系统不会重复创建审查任务。"
             }
           ]
         },
@@ -317,7 +317,7 @@
             },
             {
               "type": "text",
-              "text": "planning 节点：parse_unified_diff() 解析 diff，识别出 1 个文件（deploy.py）、14 行新增。executing 节点：MultiAgentCoordinator 启动多 Agent 协作（详见 08-多Agent 教程）。reviewing 节点：汇总 Finding，计算风险等级（存在 high → 整体 risk=\"high\"），生成 ReviewReport。"
+              "text": "planning 节点：parse_unified_diff() 解析 diff，识别出 1 个文件（deploy.py）、14 行新增。executing 节点：MultiAgentCoordinator 启动多 Agent 协作（详见 multi-agent 教程）。reviewing 节点：汇总 Finding，计算风险等级（存在 high → 整体 risk=\"high\"），生成 ReviewReport。"
             },
             {
               "type": "text",

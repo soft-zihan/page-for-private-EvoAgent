@@ -319,7 +319,7 @@
             },
             {
               "type": "text",
-              "text": "→ 每个 API 端点都遵循相同的模式：认证 → 权限检查 → 调用 ReviewService 方法 → 返回结果。ReviewService 是业务逻辑的唯一种入口，API 层不做任何业务判断。→ 修复分支推送到 GitHub 后，小王可以在 PR 页面看到 Draft PR（详见 14-GitHub 集成教程）。"
+              "text": "→ 每个 API 端点都遵循相同的模式：认证 → 权限检查 → 调用 ReviewService 方法 → 返回结果。ReviewService 是业务逻辑的唯一种入口，API 层不做任何业务判断。→ 修复分支推送到 GitHub 后，小王可以在 PR 页面看到 Draft PR（详见 github 集成教程）。"
             }
           ]
         },

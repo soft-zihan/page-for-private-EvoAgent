@@ -1,0 +1,274 @@
+{
+  "meta": {
+    "projectName": "EvoAgent PR Reviewer",
+    "primaryLanguage": "Python",
+    "framework": "标准库 http.server",
+    "granularity": "line-by-line",
+    "description": "AI 驱动的多 Agent 协作 PR 代码审查系统",
+    "modules": [
+      "Diff 解析",
+      "审查引擎",
+      "Agent 运行时",
+      "多Agent协作",
+      "持久化存储",
+      "认证与队列",
+      "上下文与记忆",
+      "进化引擎",
+      "服务编排与API"
+    ]
+  },
+  "chapters": [
+    {
+      "id": "overview",
+      "title": "项目入门与前置知识",
+      "sections": [
+        {
+          "title": "EvoAgent PR Reviewer — 项目概览",
+          "anchor": "meta-overview",
+          "groupTitle": "项目元数据",
+          "difficulty": "beginner",
+          "estimatedMinutes": 5,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "EvoAgent 是一个面向研发过程 Pull Request 的自进化 Harness 风险治理与安全修复 Agent。它接收 PR Diff，分析本次变更可能引入的安全、可靠性、正确性和回归风险，复核问题证据，并对部分规则生成保守修复。整个过程不是一次模型调用，而是一条可以恢复、重试、追踪和评测的 Agent 执行链路。"
+            },
+            {
+              "type": "text",
+              "text": "项目采用自研 Agent Runtime，负责节点调度、执行预算、超时、重试、Checkpoint、断点续跑和 Run Trace。任务中途失败后，可以从最近完成的节点恢复，不需要重新执行整个 PR 审查流程。除了 diff 审查，项目还实现了 PR Webhook、评论 Upsert、独立修复分支、Redis Streams 消费、Worker 租约、ACK、失败重试和死信队列。"
+            },
+            {
+              "type": "table",
+              "table": {
+                "headers": [
+                  "属性",
+                  "值"
+                ],
+                "rows": [
+                  [
+                    "项目名称",
+                    "EvoAgent PR Reviewer"
+                  ],
+                  [
+                    "主要语言",
+                    "Python 3.11"
+                  ],
+                  [
+                    "Web 框架",
+                    "标准库 http.server（ThreadingHTTPServer）"
+                  ],
+                  [
+                    "持久化（开发）",
+                    "SQLite（零配置）"
+                  ],
+                  [
+                    "持久化（生产）",
+                    "PostgreSQL（psycopg3）"
+                  ],
+                  [
+                    "消息队列",
+                    "Redis Streams / 内存队列"
+                  ],
+                  [
+                    "LLM 接入",
+                    "OpenAI Chat Completions 兼容协议"
+                  ],
+                  [
+                    "可观测性",
+                    "OpenTelemetry + Prometheus"
+                  ],
+                  [
+                    "认证",
+                    "自签 JWT + PBKDF2 密码哈希"
+                  ],
+                  [
+                    "部署",
+                    "Docker Compose（PostgreSQL + Redis + App）"
+                  ]
+                ]
+              }
+            },
+            {
+              "type": "list",
+              "list": {
+                "style": "icon",
+                "items": [
+                  {
+                    "content": "🔒 安全优先：所有 diff 内容被视为不可信数据，LLM 提示词明确隔离指令与数据"
+                  },
+                  {
+                    "content": "📦 双模持久：开发用 SQLite，生产用 PostgreSQL，共享同一接口"
+                  },
+                  {
+                    "content": "🔄 反馈闭环：误报/漏报/坏修复反馈驱动提示词和 Skill 的自动进化"
+                  },
+                  {
+                    "content": "🧪 门禁严格：候选版本必须在验证集提升 + 隐藏集非退化后才能激活"
+                  },
+                  {
+                    "content": "🏗️ 自研运行时：有界 Agent Loop + 持久化 checkpoint + 断点续跑"
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "title": "项目背景：PR 审查的现实问题",
+          "anchor": "meta-background",
+          "groupTitle": "项目元数据",
+          "difficulty": "beginner",
+          "estimatedMinutes": 8,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "PR 审查通常面临以下现实问题：(1) 不同 Reviewer 关注点不同，没有统一输出格式时结果很难沉淀；(2) 直接让单个大模型读取完整 PR，容易出现行号错误、风格类误报和缺少测试建议的泛泛结论；(3) 审查工具如果只给一句结论，后续很难回答「谁发现的、依据是什么、当时用了哪个提示词」；(4) 审查和修复如果直接写用户分支，风险很高。"
+            },
+            {
+              "type": "text",
+              "text": "EvoAgent 把这些问题拆开处理：DiffParser 只提取新增行，保证位置范围可控；本地规则提供确定性底线，不配置模型也能工作；多 Reviewer 并行执行，不把所有职责塞进一个 prompt；Coordinator 按位置和规则去重；Harness 保存每一步状态和消息；SafeFixer 只允许少量确定性文本修复，并创建新分支。"
+            }
+          ]
+        },
+        {
+          "title": "前置知识：Pull Request 与 Unified Diff",
+          "anchor": "background-pr-diff",
+          "groupTitle": "项目背景与核心概念",
+          "difficulty": "beginner",
+          "estimatedMinutes": 8,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "Pull Request 是代码托管平台上的变更评审单。EvoAgent 不拉取整个仓库做全量扫描，核心输入是一段 unified diff。理解这个格式是理解整个审查流程的前提。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "text",
+                "content": "--- a/app.py           # 【旧文件路径】a/ 是 Git 的标准前缀，表示变更前的版本\n+++ b/app.py           # 【新文件路径】b/ 表示变更后的版本\n@@ -1 +1,2 @@          # 【Hunk 头】格式：-旧起始行,旧行数 +新起始行,新行数\n                       # 这里表示旧文件从第1行开始共1行，新文件从第1行开始共2行\n-safe_call()           # 【删除行】以 - 开头，表示这行在 PR 中被移除\n+password = \"secret\"   # 【新增行】以 + 开头，表示这行是 PR 新增的\n+eval(user_input)      # 【新增行】另一行新增代码，EvoAgent 会审查这些新增内容",
+                "caption": "Unified Diff 格式结构"
+              }
+            },
+            {
+              "type": "text",
+              "text": "几个符号的含义：(1) --- 表示旧文件；(2) +++ 表示新文件；(3) @@ -1 +1,2 @@ 是 hunk 头，记录旧文件和新文件的起始位置；(4) - 开头是删除行；(5) + 开头是新增行；(6) 其他行是上下文。EvoAgent 只把新增行交给规则审查，这样可以把结论限定在「本次 PR 引入的问题」。"
+            }
+          ]
+        },
+        {
+          "title": "前置知识：Webhook 与 HMAC-SHA256",
+          "anchor": "background-webhook",
+          "groupTitle": "项目背景与核心概念",
+          "difficulty": "beginner",
+          "estimatedMinutes": 8,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "Webhook 是 GitHub 主动调用 EvoAgent 的 HTTP 地址。PR 创建、重新打开或推送新提交时，GitHub 把事件 payload 发到 POST /webhooks/github。只判断请求头来自 GitHub 不够，因为请求头可以伪造。"
+            },
+            {
+              "type": "text",
+              "text": "项目用 Webhook Secret 对原始请求体计算 HMAC-SHA256：expected = 'sha256=' + HMAC_SHA256(secret, raw_body)。然后用常量时间比较 hmac.compare_digest() 对比 GitHub 发来的 X-Hub-Signature-256。常量时间比较可以减少普通字符串逐字节比较带来的时序侧信道。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# Webhook 签名验证函数：确保请求确实来自 GitHub，而非伪造请求\n# 参数：secret=共享密钥, body=原始请求体, signature=GitHub 发来的签名头\ndef verify_signature(secret: str, body: bytes, signature: str) -> bool:\n    # 如果没有配置 secret 或签名格式不对，直接拒绝（防御性编程）\n    if not secret or not signature.startswith(\"sha256=\"):\n        return False\n    # 用共享密钥对请求体计算 HMAC-SHA256 摘要\n    # hmac.new(密钥, 消息, 哈希算法) → 生成唯一的消息认证码\n    expected = \"sha256=\" + hmac.new(\n        secret.encode(\"utf-8\"), body, hashlib.sha256  # 密钥编码为字节\n    ).hexdigest()  # 转为十六进制字符串\n    # 使用常量时间比较（防止时序侧信道攻击）\n    # 普通 == 比较在第一个不同字符处就返回，攻击者可据此逐字节猜测签名\n    return hmac.compare_digest(expected, signature)  # 时序安全比较",
+                "caption": "Webhook 签名验证：HMAC-SHA256 + 时序安全比较"
+              }
+            }
+          ]
+        },
+        {
+          "title": "前置知识：同步任务与异步任务",
+          "anchor": "background-sync-async",
+          "groupTitle": "项目背景与核心概念",
+          "difficulty": "beginner",
+          "estimatedMinutes": 5,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "同步审查：POST /v1/reviews，HTTP 请求会等到审查完成再返回报告。适合本地调试和短 diff。异步审查：POST /v1/reviews?async=true，服务先创建 PENDING 任务，然后把 payload 交给线程池或 Redis，立即返回任务 ID。调用方之后查询 GET /v1/tasks/{task_id}。"
+            },
+            {
+              "type": "text",
+              "text": "GitHub Webhook 默认走异步链路，因为 Webhook 不适合一直等待 LLM 或多个 Reviewer 完成。同步和异步最终调用同一个 _run_review()，所以两者使用同一个 Harness 语义和状态流。"
+            }
+          ]
+        },
+        {
+          "title": "前置知识：有限状态机",
+          "anchor": "background-fsm",
+          "groupTitle": "项目背景与核心概念",
+          "difficulty": "beginner",
+          "estimatedMinutes": 5,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "有限状态机把任务限制在允许的路径上。EvoAgent 的正常状态是 PENDING → PLANNING → EXECUTING → REVIEWING → SUCCESS。运行中出错时进入 FAILED。状态不能随便跳，例如 PENDING 不能直接变成 SUCCESS。这类限制放在代码里比写在 prompt 里可靠，因为模型不能绕过状态机直接宣布任务成功。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "python",
+                "content": "# 有限状态机转换表：定义每个状态可以合法迁移到哪些目标状态\n# 键=当前状态，值=允许的目标状态集合\n# 这种设计把合法转换路径硬编码在代码中，LLM 无法绕过\nALLOWED = {\n    # PENDING（刚创建）→ 只能进入规划阶段、失败或取消\n    TaskState.PENDING:   {TaskState.PLANNING, TaskState.FAILED, TaskState.CANCELLED},\n    # PLANNING（解析diff中）→ 只能进入执行阶段、失败或取消\n    TaskState.PLANNING:  {TaskState.EXECUTING, TaskState.FAILED, TaskState.CANCELLED},\n    # EXECUTING（审查中）→ 只能进入报告生成、失败或取消\n    TaskState.EXECUTING: {TaskState.REVIEWING, TaskState.FAILED, TaskState.CANCELLED},\n    # REVIEWING（生成报告中）→ 只能进入成功、失败或取消\n    TaskState.REVIEWING: {TaskState.SUCCESS, TaskState.FAILED, TaskState.CANCELLED},\n}\n# 终态（SUCCESS/FAILED/CANCELLED）不在 ALLOWED 左侧，不能继续迁移\n# 这意味着一旦任务完成/失败/取消，就不可再被改变——保证审计完整性",
+                "caption": "有限状态机：严格的状态转换规则"
+              }
+            }
+          ]
+        },
+        {
+          "title": "Agent 范式：分层设计",
+          "anchor": "meta-agent-paradigm",
+          "groupTitle": "项目元数据",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 10,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "EvoAgent 没有把所有流程都做成开放式 Agent Loop，而是采用了分层设计。外层是 Workflow Agent，PR 审查按照 Planner → Specialists → Deliberation → Evidence → Verifier → Arbiter 执行。固定流程更容易做 Checkpoint、失败恢复和结果复现，也能避免模型随意跳过验证步骤。"
+            },
+            {
+              "type": "text",
+              "text": "Specialist 内部采用有界 **ReAct 范式**。ReAct（Reason + Act，推理+行动）是 LLM Agent 的工作模式——模型先推理「我应该调用什么工具？」，然后行动调用工具，拿到结果后继续推理下一步，循环往复直到返回最终结论。就像侦探破案：先推理（应该查指纹），再行动（采集指纹），拿到结果后再推理（指纹匹配嫌疑人 A），再行动（审讯 A）……直到破案。「有界」是指循环受最大步数和执行时间限制，防止 Agent 无限循环。本地规则 Reviewer 不需要推理和工具调用，仍采用确定性的单次执行。"
+            }
+          ]
+        },
+        {
+          "title": "项目完整流程总览",
+          "anchor": "background-full-flow",
+          "groupTitle": "项目背景与核心概念",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 10,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "理解 EvoAgent 的完整流程有助于把握各模块之间的关系。以下是从 diff 输入到报告输出的完整链路："
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "text",
+                "content": "提交 unified diff / GitHub PR Webhook    # 【入口】用户提交代码变更或 GitHub 触发 Webhook\n↓\n验签、鉴权、租户/仓库授权、大小与格式校验  # 【安全层】HMAC 验签 + 权限检查 + 输入验证\n↓\n创建任务并进入队列（同步或异步）          # 【任务管理】生成 Task 对象，放入任务队列\n↓\n解析新增行 → Planner 分配 → Specialist 并行审查  # 【核心审查】DiffParser 提取新增行，Planner 分配给多个 Agent\n↓\nCritic / Reflection → Evidence → Verifier → Arbiter  # 【质量门禁】多轮反思 + 证据验证 + 仲裁去重\n↓\n生成 JSON / Markdown 报告，持久化 trace、checkpoint 和 Finding  # 【输出层】生成报告并保存到数据库\n↓\n可选：反馈回流、自动修复、GitHub 评论、提示词/Skill 候选评测  # 【扩展功能】反馈循环 + 自动修复 + 进化机制",
+                "caption": "EvoAgent 完整审查流程"
+              }
+            },
+            {
+              "type": "diagram",
+              "diagram": {
+                "language": "mermaid",
+                "content": "graph TB\n    A[GitHub Pull Request] --> B[Webhook HMAC 验签]\n    B --> C[直接 API / Web 管理台]\n    C --> D[ReviewService]\n    D --> E[TaskStore / TaskQueue]\n    E --> F[ReviewHarness]\n    F --> G[Unified Diff Parser]\n    F --> H[MultiAgentCoordinator]\n    H --> I[Security Agent]\n    H --> J[Reliability Agent]\n    H --> K[Dynamic Skill]\n    H --> L[LLM Reviewer]\n    I & J & K & L --> M[Finding 去重与质量门禁]\n    M --> N[JSON / Markdown / GitHub Comment]\n    N --> O[人工反馈]\n    O --> P[Validation + Holdout 回放]\n    P --> Q[激活或回滚提示词]",
+                "caption": "EvoAgent 系统架构图"
+              }
+            },
+            {
+              "type": "text",
+              "text": "前置知识就绪。下一章进入架构全景，并用 PR #42 案例跟踪从 Webhook 到报告的完整流程。"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -306,7 +306,7 @@
           "blocks": [
             {
               "type": "text",
-              "text": "进化引擎模块的设计原则：(1) 真实回放——候选必须通过系统自己的回放评测，不接受外部声称的分数；(2) 隐藏集保护——隐藏集只返回聚合指标，不暴露案例详情，防止过拟合；(3) 非退化门禁——受保护指标（precision、recall、high_severity_recall、clean_accuracy）不允许退化；(4) 安全优先——提示词禁止注入指令，Skill 禁止代码执行和主机权限；(5) 版本审计——所有评测运行、版本、指标和激活决定均持久化，支持回滚；(6) 可证明进化——evolution_proof.py 提供受控环境下的可审计进化证据，明确区分「行为改变」和「LLM 权重提升」。→ 延伸阅读：评测回放使用的 EndToEndEvaluationHarness 详见 17-评测教程；进化后的 Skill 如何注入 MultiAgentCoordinator 详见 08-多Agent 教程。"
+              "text": "进化引擎模块的设计原则：(1) 真实回放——候选必须通过系统自己的回放评测，不接受外部声称的分数；(2) 隐藏集保护——隐藏集只返回聚合指标，不暴露案例详情，防止过拟合；(3) 非退化门禁——受保护指标（precision、recall、high_severity_recall、clean_accuracy）不允许退化；(4) 安全优先——提示词禁止注入指令，Skill 禁止代码执行和主机权限；(5) 版本审计——所有评测运行、版本、指标和激活决定均持久化，支持回滚；(6) 可证明进化——evolution_proof.py 提供受控环境下的可审计进化证据，明确区分「行为改变」和「LLM 权重提升」。→ 延伸阅读：评测回放使用的 EndToEndEvaluationHarness 详见 17-评测教程；进化后的 Skill 如何注入 MultiAgentCoordinator 详见 multi-agent 教程。"
             },
             {
               "type": "text",

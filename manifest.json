@@ -1,66 +1,61 @@
 {
   "files": [
-    "00-meta.json",
-    "01-preparation.json",
-    "02-background.json",
-    "03-architecture.json",
-    "04-design-patterns.json",
-    "05-quickstart.json",
-    "06-diff-parser.json",
-    "07-review-engine.json",
-    "08-runtime.json",
-    "09-multi-agent.json",
-    "14-service-api.json",
-    "15-github-integration.json",
-    "10-persistence.json",
-    "11-auth-queue.json",
-    "12-context-memory.json",
-    "23-observability.json",
-    "24-concurrency.json",
-    "13-evolution.json",
-    "16-auto-fix.json",
-    "17-skill-sandbox.json",
-    "18-evaluation.json",
-    "19-github-setup.json",
-    "21-tech-stack.json",
-    "22-agent-frameworks.json",
-    "20-interview.json"
+    "overview.json",
+    "setup.json",
+    "quickstart.json",
+    "architecture.json",
+    "design-patterns.json",
+    "diff-parser.json",
+    "review-engine.json",
+    "runtime.json",
+    "multi-agent.json",
+    "context-memory.json",
+    "persistence.json",
+    "auth-queue.json",
+    "observability.json",
+    "concurrency.json",
+    "evolution.json",
+    "evaluation.json",
+    "auto-fix.json",
+    "skill-sandbox.json",
+    "service-api.json",
+    "github.json",
+    "tech-stack.json",
+    "agent-frameworks.json",
+    "interview.json"
   ],
   "groups": [
     {
-      "title": "入门导引",
-      "description": "项目概览、环境准备、核心概念、架构全景、动手体验",
-      "files": ["00-meta.json", "01-preparation.json", "02-background.json", "03-architecture.json", "04-design-patterns.json", "05-quickstart.json"]
+      "title": "项目入门",
+      "files": ["overview.json", "setup.json", "quickstart.json"]
     },
     {
-      "title": "核心模块链",
-      "description": "Diff 解析 → 审查引擎 → 运行时 → 多 Agent 协作 → 服务编排 → GitHub 集成",
-      "files": ["06-diff-parser.json", "07-review-engine.json", "08-runtime.json", "09-multi-agent.json", "14-service-api.json", "15-github-integration.json"]
+      "title": "架构与设计",
+      "files": ["architecture.json", "design-patterns.json"]
     },
     {
-      "title": "基础设施层",
-      "description": "持久化、认证与队列、上下文与记忆、观测与监控、并发模型",
-      "files": ["10-persistence.json", "11-auth-queue.json", "12-context-memory.json", "23-observability.json", "24-concurrency.json"]
+      "title": "审查引擎",
+      "files": ["diff-parser.json", "review-engine.json"]
     },
     {
-      "title": "高级功能",
-      "description": "进化引擎、自动修复、Skill 沙箱、评测系统",
-      "files": ["13-evolution.json", "16-auto-fix.json", "17-skill-sandbox.json", "18-evaluation.json"]
+      "title": "Agent 设计专题",
+      "files": ["runtime.json", "multi-agent.json", "context-memory.json"]
     },
     {
-      "title": "实战指南",
-      "description": "GitHub 端到端连接指南",
-      "files": ["19-github-setup.json"]
+      "title": "基础设施",
+      "files": ["persistence.json", "auth-queue.json", "observability.json", "concurrency.json"]
     },
     {
-      "title": "参考与选型",
-      "description": "技术选型速查、Agent 框架迁移对照",
-      "files": ["21-tech-stack.json", "22-agent-frameworks.json"]
+      "title": "高级能力",
+      "files": ["evolution.json", "evaluation.json", "auto-fix.json", "skill-sandbox.json"]
+    },
+    {
+      "title": "接入·部署·参考",
+      "files": ["service-api.json", "github.json", "tech-stack.json", "agent-frameworks.json"]
     },
     {
       "title": "面试准备",
-      "description": "面试 Q&A、真实面经",
-      "files": ["20-interview.json"]
+      "files": ["interview.json"]
     }
   ]
 }

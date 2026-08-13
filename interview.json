@@ -1,5 +1,5 @@
 {
-  "id": "20-interview",
+  "id": "interview",
   "title": "面试准备",
   "description": "Agent 开发核心面试题 + 真实面经",
   "chapters": [
@@ -33,7 +33,7 @@
               "type": "question",
               "category": "状态管理",
               "question": "第二个 bullet：任务状态机怎么写？",
-              "answer": "**写法**：\n> 统一管理任务状态机（PENDING → PLANNING → EXECUTING → REVIEWING → SUCCESS/FAILED）、执行预算（max_steps/timeout）、节点重试、持久化 Checkpoint、任务取消、断点续跑及 Run Trace，保障长流程任务的可恢复性与容错能力。\n\n**面试追问准备**：\n- 状态机有哪几个状态？（7 个，见 08-runtime.json）\n- Checkpoint 以什么为主键？（task_id + node）\n- 为什么跨任务不复用 Checkpoint？（输入不同、模型可能更新、避免污染）"
+              "answer": "**写法**：\n> 统一管理任务状态机（PENDING → PLANNING → EXECUTING → REVIEWING → SUCCESS/FAILED）、执行预算（max_steps/timeout）、节点重试、持久化 Checkpoint、任务取消、断点续跑及 Run Trace，保障长流程任务的可恢复性与容错能力。\n\n**面试追问准备**：\n- 状态机有哪几个状态？（7 个，见 runtime.json）\n- Checkpoint 以什么为主键？（task_id + node）\n- 为什么跨任务不复用 Checkpoint？（输入不同、模型可能更新、避免污染）"
             },
             {
               "type": "question",

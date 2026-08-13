@@ -5,6 +5,35 @@
       "title": "设计模式与模块索引",
       "sections": [
         {
+          "title": "Agent 范式：分层设计",
+          "anchor": "meta-agent-paradigm",
+          "groupTitle": "项目元数据",
+          "difficulty": "intermediate",
+          "estimatedMinutes": 10,
+          "blocks": [
+            {
+              "type": "text",
+              "text": "EvoAgent 没有把所有流程都做成开放式 Agent Loop，而是采用了分层设计。外层是 Workflow Agent，PR 审查按照 Planner → Specialists → Deliberation → Evidence → Verifier → Arbiter 执行。固定流程更容易做 Checkpoint、失败恢复和结果复现，也能避免模型随意跳过验证步骤。"
+            },
+            {
+              "type": "text",
+              "text": "Specialist 内部采用有界 **ReAct 范式**。ReAct（Reason + Act，推理+行动）是 LLM Agent 的工作模式——模型先推理「我应该调用什么工具？」，然后行动调用工具，拿到结果后继续推理下一步，循环往复直到返回最终结论。就像侦探破案：先推理（应该查指纹），再行动（采集指纹），拿到结果后再推理（指纹匹配嫌疑人 A），再行动（审讯 A）……直到破案。「有界」是指循环受最大步数和执行时间限制，防止 Agent 无限循环。本地规则 Reviewer 不需要推理和工具调用，仍采用确定性的单次执行。"
+            },
+            {
+              "type": "code",
+              "code": {
+                "language": "text",
+                "content": "一次完整运行链路：\n# ── 接入阶段：接收外部请求 ──\n\nPR Webhook 进入队列                        # GitHub 在 PR 变更时主动 POST 到 EvoAgent 的公网地址\n→ Harness 创建并管理审查任务                 # ReviewHarness 创建任务记录，驱动后续 3 个节点执行\n→ 自研 Runtime 执行任务节点                  # AgentRuntime 负责调度、预算控制、超时和 checkpoint\n# ── 规划阶段：分解风险领域 ──\n→ Planner 分解 PR 风险领域                  # 分析 diff 涉及的文件和模块，生成审查任务计划\n# ── 审查阶段：多 Agent 并行发现 + 协作验证 ──\n→ Specialist 并行执行                       # Security / Reliability / LLM Agent 各自独立审查\n→ LLM Specialist 进入 Agent Loop 并调用工具  # 有界 ReAct 循环：Plan→Tool→Observe→Final\n→ Critic 提出质疑                           # 检查 Finding 的证据是否充分、推理是否合理\n→ Reflection 要求原 Agent 修订              # 原 Agent 根据 Critic 反馈补充证据或撤回结论\n→ Evidence 独立复核代码证据                  # 不依赖 LLM，用确定性逻辑验证证据真实性\n# ── 验证阶段：门禁与裁决 ──\n→ Verifier 执行证据、置信度和修复门禁        # 综合判断 Finding 是否通过，调整置信度\n→ Arbiter 去重、冲突裁决和排序               # 合并重复 Finding，按严重级别排序输出\n# ── 输出阶段：报告与持久化 ──\n→ Harness 生成报告并保存 Checkpoint、Trace 和记忆  # ReviewReport 存入数据库，Trace 用于回放\n# ── 进化阶段：反馈驱动持续改进 ──\n→ 人工反馈及执行异常进入失败案例库            # 误报/漏报/坏修复作为学习信号\n→ Evolution Engine 生成候选版本               # 自动提出 Prompt 和 Skill 的修改建议\n→ Validation 和 Holdout 评测                 # 候选必须在验证集提升 + 隐藏集非退化\n→ 激活、灰度或拒绝候选                       # 通过门禁的新版本自动上线\n→ 必要时回滚历史版本                         # 一键恢复到任意历史稳定版本",
+                "caption": "EvoAgent 完整执行链路"
+              }
+            },
+            {
+              "type": "text",
+              "text": "项目还使用了 Plan and Execute、Critic and Reflection、Independent Verification 和 Memory-augmented Agent 等模式，但分别对应任务分派、问题质疑、修订复核和历史经验召回，没有包装成概念。"
+            }
+          ]
+        },
+        {
           "title": "设计模式识别",
           "anchor": "arch-patterns",
           "groupTitle": "架构设计",
@@ -17,7 +46,7 @@
             },
             {
               "type": "text",
-              "text": "在深入表格之前，先理解几个核心概念：\n\n**什么是设计模式？** 设计模式是软件工程中反复出现的「最佳实践」解决方案。就像建筑中的「拱门」「飞扶壁」——每种结构解决一种力学问题。软件设计模式也是类似——每种模式解决一种代码组织问题。下面用生活化类比解释项目中用到的模式。\n\n**什么是幂等性（Idempotency）？** 幂等性指同一个操作执行一次和执行多次结果相同。就像电梯的「关门」按钮——不管你按了 1 次还是 10 次，门只会关一次。在分布式系统中，网络请求可能重试，幂等性保证重复请求不会产生副作用（如重复创建任务）。\n\n**什么是 HMAC？** 将在 10-认证与队列 中详细讲解。简单说，它就像火漆印章，用共享密钥给消息签名，接收方验证签名确认消息来源和完整性。\n\n**什么是 OpenTelemetry？** 将在本章「基础设施模块」一节中详细讲解。简单说，它是系统的「全套体检设备」——Trace（追踪路径）、Metrics（数值指标）、Logs（日志）三类可观测数据的统一收集标准。"
+              "text": "在深入表格之前，先理解几个核心概念：\n\n**什么是设计模式？** 设计模式是软件工程中反复出现的「最佳实践」解决方案。就像建筑中的「拱门」「飞扶壁」——每种结构解决一种力学问题。软件设计模式也是类似——每种模式解决一种代码组织问题。下面用生活化类比解释项目中用到的模式。\n\n**什么是幂等性（Idempotency）？** 幂等性指同一个操作执行一次和执行多次结果相同。就像电梯的「关门」按钮——不管你按了 1 次还是 10 次，门只会关一次。在分布式系统中，网络请求可能重试，幂等性保证重复请求不会产生副作用（如重复创建任务）。\n\n**什么是 HMAC？** 将在 auth-queue 中详细讲解。简单说，它就像火漆印章，用共享密钥给消息签名，接收方验证签名确认消息来源和完整性。\n\n**什么是 OpenTelemetry？** 将在本章「基础设施模块」一节中详细讲解。简单说，它是系统的「全套体检设备」——Trace（追踪路径）、Metrics（数值指标）、Logs（日志）三类可观测数据的统一收集标准。"
             },
             {
               "type": "table",
@@ -154,7 +183,7 @@
             },
             {
               "type": "text",
-              "text": "config.py 中的 Settings dataclass 在 01-前置准备 中已详细介绍。这里补充的是完整的 LLM 路由逻辑：resolved_llm() 根据 llm_provider 名称路由到不同后端（deepseek、openrouter-free、custom），每个后端有不同的 base_url 和默认模型。validate_evolution() 校验进化参数的合理性（如 min_cases ≤ max_cases、auth_secret ≥ 32 字节）。"
+              "text": "config.py 中的 Settings dataclass 在 setup 中已详细介绍。这里补充的是完整的 LLM 路由逻辑：resolved_llm() 根据 llm_provider 名称路由到不同后端（deepseek、openrouter-free、custom），每个后端有不同的 base_url 和默认模型。validate_evolution() 校验进化参数的合理性（如 min_cases ≤ max_cases、auth_secret ≥ 32 字节）。"
             },
             {
               "type": "text",

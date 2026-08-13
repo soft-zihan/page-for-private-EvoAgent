@@ -496,7 +496,7 @@
           "blocks": [
             {
               "type": "text",
-              "text": "恭喜你完成了核心模块链的学习！让我们回顾一下从 05 到 08 建立的知识体系：\n\n**数据流主线**：unified diff → ParsedDiff（05-Diff解析）→ Finding 列表（06-审查引擎）→ ReviewReport（07-运行时）→ 多 Agent 协作优化（08-多Agent）\n\n**核心设计决策**：\n- **只审查新增行**：减少噪声，聚焦本次变更引入的问题\n- **确定性规则 + LLM 互补**：规则提供安全底线，LLM 处理语义问题\n- **多 Agent 交叉验证**：Critic 质疑 → Evidence 复核 → Verifier 裁决，对抗 LLM 幻觉\n- **运行时与审查分离**：AgentRuntime 只负责执行和 checkpoint，不知道「审查」是什么\n\n**面试关键点**：\n- 被问到「为什么不用 LangChain」→ 三个需求：checkpoint 可控、严格预算、任务取消\n- 被问到「如何降低误报」→ 四道门禁 + 多 Agent 协作\n- 被问到「系统亮点」→ 进化引擎从反馈中学习，评测系统防过拟合\n\n接下来的教程将深入基础设施层（持久化、认证、记忆），这些模块为核心流程提供支撑。"
+              "text": "恭喜你完成了核心模块链的学习！让我们回顾一下从 05 到 08 建立的知识体系：\n\n**数据流主线**：unified diff → ParsedDiff（05-Diff解析）→ Finding 列表（06-审查引擎）→ ReviewReport（runtime）→ 多 Agent 协作优化（multi-agent）\n\n**核心设计决策**：\n- **只审查新增行**：减少噪声，聚焦本次变更引入的问题\n- **确定性规则 + LLM 互补**：规则提供安全底线，LLM 处理语义问题\n- **多 Agent 交叉验证**：Critic 质疑 → Evidence 复核 → Verifier 裁决，对抗 LLM 幻觉\n- **运行时与审查分离**：AgentRuntime 只负责执行和 checkpoint，不知道「审查」是什么\n\n**面试关键点**：\n- 被问到「为什么不用 LangChain」→ 三个需求：checkpoint 可控、严格预算、任务取消\n- 被问到「如何降低误报」→ 四道门禁 + 多 Agent 协作\n- 被问到「系统亮点」→ 进化引擎从反馈中学习，评测系统防过拟合\n\n接下来的教程将深入基础设施层（持久化、认证、记忆），这些模块为核心流程提供支撑。"
             },
             {
               "type": "text",
