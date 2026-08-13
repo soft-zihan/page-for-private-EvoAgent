@@ -10,21 +10,21 @@
     "07-review-engine.json",
     "08-runtime.json",
     "09-multi-agent.json",
+    "14-service-api.json",
+    "15-github-integration.json",
     "10-persistence.json",
     "11-auth-queue.json",
     "12-context-memory.json",
+    "23-observability.json",
+    "24-concurrency.json",
     "13-evolution.json",
-    "14-service-api.json",
-    "15-github-integration.json",
     "16-auto-fix.json",
     "17-skill-sandbox.json",
     "18-evaluation.json",
     "19-github-setup.json",
     "20-interview.json",
     "21-tech-stack.json",
-    "22-agent-frameworks.json",
-    "23-observability.json",
-    "24-concurrency.json"
+    "22-agent-frameworks.json"
   ],
   "groups": [
     {
@@ -34,8 +34,8 @@
     },
     {
       "title": "核心模块链",
-      "description": "Diff 解析 → 审查引擎 → 运行时 → 多 Agent 协作",
-      "files": ["06-diff-parser.json", "07-review-engine.json", "08-runtime.json", "09-multi-agent.json"]
+      "description": "Diff 解析 → 审查引擎 → 运行时 → 多 Agent 协作 → 服务编排 → GitHub 集成",
+      "files": ["06-diff-parser.json", "07-review-engine.json", "08-runtime.json", "09-multi-agent.json", "14-service-api.json", "15-github-integration.json"]
     },
     {
       "title": "基础设施层",
@@ -44,8 +44,8 @@
     },
     {
       "title": "高级功能",
-      "description": "进化引擎、服务编排、GitHub 集成、自动修复、Skill 沙箱、评测系统",
-      "files": ["13-evolution.json", "14-service-api.json", "15-github-integration.json", "16-auto-fix.json", "17-skill-sandbox.json", "18-evaluation.json"]
+      "description": "进化引擎、自动修复、Skill 沙箱、评测系统",
+      "files": ["13-evolution.json", "16-auto-fix.json", "17-skill-sandbox.json", "18-evaluation.json"]
     },
     {
       "title": "实战指南",
