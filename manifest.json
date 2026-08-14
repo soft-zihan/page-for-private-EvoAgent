@@ -22,7 +22,9 @@
     "github.json",
     "tech-stack.json",
     "agent-frameworks.json",
-    "interview.json"
+    "interview.json",
+    "cloud-factory-comparison.json",
+    "evaluation-experiments.json"
   ],
   "groups": [
     {
@@ -56,6 +58,10 @@
     {
       "title": "面试准备",
       "files": ["interview.json"]
+    },
+    {
+      "title": "对比分析",
+      "files": ["cloud-factory-comparison.json"]
     }
   ]
 }
